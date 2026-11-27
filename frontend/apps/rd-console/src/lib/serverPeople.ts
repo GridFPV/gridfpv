@@ -57,7 +57,11 @@ import {
   setServerEmail,
   removeServerEmail,
   confirmServerEmail,
-  forgotServerPassword
+  forgotServerPassword,
+  serverMail,
+  setServerMail,
+  removeServerMail,
+  testServerMail
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
@@ -76,6 +80,8 @@ import type {
   MyAccount,
   MyClassResult,
   EmailConfirmed,
+  ServerEmail,
+  ServerEmailChange,
   MyResult,
   PasswordChange,
   PasswordSignUp,
@@ -182,6 +188,13 @@ export interface PeopleApi {
   confirmEmail(secret: string): Promise<EmailConfirmed>;
   /** Ask for a link to set a new password, by username or email address. */
   forgotPassword(who: string): Promise<void>;
+  /** The email account the server sends from, for an owner. Never its password. */
+  mailSettings(): Promise<ServerEmail>;
+  setMailSettings(change: ServerEmailChange): Promise<ServerEmail>;
+  /** Forget what was set on the page. Settings in the server's own file are used again. */
+  removeMailSettings(): Promise<ServerEmail>;
+  /** Send one mail to check the settings. It throws with the email server's own words. */
+  testMail(to: string): Promise<void>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -244,6 +257,10 @@ export function peopleApi(baseUrl: string): PeopleApi {
     removeEmail: () => removeServerEmail(baseUrl),
     confirmEmail: (secret) => confirmServerEmail(baseUrl, secret),
     forgotPassword: (who) => forgotServerPassword(baseUrl, who),
+    mailSettings: () => serverMail(baseUrl),
+    setMailSettings: (change) => setServerMail(baseUrl, change),
+    removeMailSettings: () => removeServerMail(baseUrl),
+    testMail: (to) => testServerMail(baseUrl, to),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }

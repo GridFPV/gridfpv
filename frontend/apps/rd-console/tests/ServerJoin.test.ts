@@ -283,6 +283,10 @@ describe("joining from a club's own address", () => {
 
 describe("who can join, on a club's own page", () => {
   const setting = () => screen.findByTestId('club-join-setting');
+  const flip = (card: HTMLElement) =>
+    within(card).getByRole('switch', {
+      name: 'Let anyone with an account join'
+    }) as HTMLInputElement;
   const asking = () => screen.findByTestId('club-join-asks');
   const adding = () => screen.findByTestId('club-add-someone');
   const PEOPLE = [
@@ -297,12 +301,12 @@ describe("who can join, on a club's own page", () => {
     const state = async () => within(await setting()).getByTestId('club-open-state');
     expect(await state()).toHaveTextContent('Private');
 
-    await fireEvent.click(within(await setting()).getByRole('button', { name: 'Make it public' }));
+    await fireEvent.click(flip(await setting()));
     await waitFor(() => expect(people.setClubOpen).toHaveBeenCalledWith('north', true));
     await waitFor(async () => expect(await state()).toHaveTextContent('Public'));
     expect(server.clubList[0].open).toBe(true);
 
-    await fireEvent.click(within(await setting()).getByRole('button', { name: 'Make it private' }));
+    await fireEvent.click(flip(await setting()));
     await waitFor(() => expect(people.setClubOpen).toHaveBeenCalledWith('north', false));
     await waitFor(async () => expect(await state()).toHaveTextContent('Private'));
     expect(server.clubList[0].open).toBe(false);

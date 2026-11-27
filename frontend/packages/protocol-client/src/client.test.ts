@@ -676,6 +676,35 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     await expect(forgotServerPassword(base, 'ace', { fetch: empty })).resolves.toBeUndefined();
   });
 
+  it("a server's email settings go to the right addresses", async () => {
+    const { serverMail, setServerMail, removeServerMail, testServerMail } =
+      await import('./client.js');
+    const view = {
+      source: 'page',
+      host: 'smtp.example.org',
+      password_set: true,
+      knows_address: true
+    };
+    const { seen, fetch } = recorder(200, view);
+    const base = 'https://grid.example.org';
+    expect(await serverMail(`${base}/`, { fetch })).toEqual(view);
+    expect(seen[0].url).toBe(`${base}/api/server/email`);
+    expect(seen[0].init?.method ?? 'GET').toBe('GET');
+    const change = { host: 'smtp.example.org', from: 'Grid <grid@example.org>', password: 'pw' };
+    await setServerMail(base, change, { fetch });
+    expect(seen[1].url).toBe(`${base}/api/server/email`);
+    expect(seen[1].init?.method).toBe('PUT');
+    expect(JSON.parse(seen[1].init?.body as string)).toEqual(change);
+    await removeServerMail(base, { fetch });
+    expect(seen[2].init?.method).toBe('DELETE');
+    // The test answers with no body: that is not an error.
+    const empty = (async () => new Response(null, { status: 204 })) as typeof globalThis.fetch;
+    await expect(testServerMail(base, 'oz@example.org', { fetch: empty })).resolves.toBeUndefined();
+    await testServerMail(base, 'oz@example.org', { fetch });
+    expect(seen[3].url).toBe(`${base}/api/server/email/test`);
+    expect(JSON.parse(seen[3].init?.body as string)).toEqual({ to: 'oz@example.org' });
+  });
+
   it('email goes to the right addresses', async () => {
     const { setServerEmail, removeServerEmail, confirmServerEmail, forgotServerPassword } =
       await import('./client.js');

@@ -155,7 +155,7 @@ test('pilots make their own accounts and get into a club the ways a club allows'
   await openServerPage(ryan, 'Settings');
   await ryan
     .getByTestId('club-join-setting')
-    .getByRole('button', { name: 'Make it public' })
+    .getByRole('switch', { name: 'Let anyone with an account join' })
     .click();
   await expect(ryan.getByTestId('club-join-setting').getByTestId('club-open-state')).toHaveText(
     'Public'

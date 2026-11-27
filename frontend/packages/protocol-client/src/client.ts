@@ -54,6 +54,8 @@ import type {
   ClubSettings,
   PilotProfile,
   EmailConfirmed,
+  ServerEmail,
+  ServerEmailChange,
   PasswordChange,
   PasswordSignIn,
   PasswordSignUp,
@@ -1275,6 +1277,66 @@ export async function forgotServerPassword(
     '/api/password/forgot',
     { method: 'POST', body: { who }, fetch: options.fetch },
     'ask for a link'
+  );
+}
+
+/**
+ * The email account a server sends from (`GET /api/server/email`). For an owner of the
+ * server. The account's password is never in it.
+ */
+export async function serverMail(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerEmail> {
+  return apiJson<ServerEmail>(
+    baseUrl,
+    '/api/server/email',
+    { fetch: options.fetch },
+    'read the email settings'
+  );
+}
+
+/** Set the email account a server sends from (`PUT /api/server/email`). For an owner. */
+export async function setServerMail(
+  baseUrl: string,
+  change: ServerEmailChange,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerEmail> {
+  return apiJson<ServerEmail>(
+    baseUrl,
+    '/api/server/email',
+    { method: 'PUT', body: change, fetch: options.fetch },
+    'save the email settings'
+  );
+}
+
+/** Forget the email account set on the page (`DELETE /api/server/email`). For an owner. */
+export async function removeServerMail(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerEmail> {
+  return apiJson<ServerEmail>(
+    baseUrl,
+    '/api/server/email',
+    { method: 'DELETE', fetch: options.fetch },
+    'remove the email settings'
+  );
+}
+
+/**
+ * Send one mail with a server's email settings, to check they work
+ * (`POST /api/server/email/test`). For an owner. It answers with no body.
+ */
+export async function testServerMail(
+  baseUrl: string,
+  to: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/api/server/email/test',
+    { method: 'POST', body: { to }, fetch: options.fetch },
+    'send the test'
   );
 }
 

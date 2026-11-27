@@ -1,8 +1,10 @@
 //! Email a server sends (docs/primitives.md §13.8).
 //!
 //! **A server sends email only when its owner sets it up**, with the settings of an email
-//! account they have (`GRIDFPV_SERVER_SMTP_*`). With none, nothing here does anything, and
-//! a forgotten password is set again with a link an owner hands over.
+//! account they have. An owner gives them on the server's Email page, or in the
+//! environment (`GRIDFPV_SERVER_SMTP_*`). What was given on the page wins. With none,
+//! nothing here does anything, and a forgotten password is set again with a link an owner
+//! hands over.
 //!
 //! It is used for two things, and no more:
 //!
@@ -21,6 +23,10 @@
 //! | `DELETE /api/me/email` | an account | take the address off |
 //! | `POST /api/email/confirm` | whoever has the link | confirm an address |
 //! | `POST /api/password/forgot` | anyone | ask for a link to set a new password |
+//! | `GET /api/server/email` | an owner | the email account the server sends from. Never its password |
+//! | `PUT /api/server/email` | an owner | set that account |
+//! | `DELETE /api/server/email` | an owner | forget what was set on the page |
+//! | `POST /api/server/email/test` | an owner | send one mail, to check it works |
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -37,7 +43,7 @@ use lettre::{Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executo
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::accounts::AccountId;
+use crate::accounts::{AccountId, Act, Standing};
 use crate::app::AppState;
 use crate::people::{Me, Signed, me_of, now_ms};
 use crate::push::ApiError;
@@ -51,11 +57,16 @@ const RESET_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How long before the same account is sent another link to confirm its address.
 const CONFIRM_EVERY: Duration = Duration::from_secs(60);
 
+/// How long before the same owner sends another test mail.
+const TEST_EVERY: Duration = Duration::from_secs(5);
+
 /// The longest an email address may be.
 const ADDRESS_MAX: usize = 254;
 
 /// How the connection to the email server is kept private.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+#[serde(rename_all = "lowercase")]
 pub enum MailTls {
     /// Start in the clear, then switch to TLS before anything is said. The usual way, on
     /// port 587.
@@ -66,8 +77,9 @@ pub enum MailTls {
     None,
 }
 
-/// The settings of the email account a server sends from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The settings of the email account a server sends from. It holds the account's
+/// password, so it is never sent to a browser: [`ServerEmail`] is what an owner is shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailSettings {
     pub host: String,
     pub port: u16,
@@ -78,7 +90,59 @@ pub struct MailSettings {
     pub tls: MailTls,
 }
 
+/// Whether an email server's name means this same computer.
+fn is_local(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+/// The port an email server is reached on when none is given.
+fn usual_port(tls: MailTls) -> u16 {
+    if tls == MailTls::Tls { 465 } else { 587 }
+}
+
 impl MailSettings {
+    /// The settings an owner typed on the page, tidied and checked. `kept` is the password
+    /// already held, used when none is typed. `Err` says what is wrong, in words.
+    pub fn from_page(change: ServerEmailChange, kept: Option<String>) -> Result<Self, String> {
+        let tidy =
+            |text: Option<String>| text.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+        let host = tidy(Some(change.host)).ok_or("Give the name of the email server.")?;
+        if host.len() > 253 || host.chars().any(|c| c.is_whitespace() || c == '/') {
+            return Err(
+                "That is not the name of an email server. It looks like: smtp.example.org".into(),
+            );
+        }
+        let from = tidy(Some(change.from)).ok_or("Say who the mail is from.")?;
+        from.parse::<Mailbox>().map_err(
+            |_| "Who the mail is from is not an address. It looks like: Grid <grid@example.org>",
+        )?;
+        let tls = change.tls.unwrap_or(MailTls::StartTls);
+        if tls == MailTls::None && !is_local(&host) {
+            return Err("No TLS is only for an email server on this same computer.".into());
+        }
+        let port = match change.port {
+            Some(0) => return Err("That is not a port number.".into()),
+            Some(port) => port,
+            None => usual_port(tls),
+        };
+        let user = tidy(change.user);
+        // A password is the account's own: it is not trimmed past its ends being empty.
+        let password = change.password.filter(|p| !p.is_empty()).or(kept);
+        let password = match (&user, password) {
+            (Some(_), None) => return Err("Give the password of that email account.".into()),
+            (Some(_), password) => password,
+            (None, _) => None,
+        };
+        Ok(Self {
+            host,
+            port,
+            user,
+            password,
+            from,
+            tls,
+        })
+    }
+
     /// The settings in the environment, when they are all there and make sense. `Err`
     /// says what is wrong, for the owner to read when the server starts.
     pub fn from_env() -> Result<Option<Self>, String> {
@@ -100,7 +164,7 @@ impl MailSettings {
         from.parse::<Mailbox>().map_err(|_| {
             "GRIDFPV_SERVER_SMTP_FROM is not an address. It looks like: Grid <grid@example.org>"
         })?;
-        let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]");
+        let local = is_local(&host);
         let tls = match get("TLS")
             .as_deref()
             .map(str::to_ascii_lowercase)
@@ -121,8 +185,7 @@ impl MailSettings {
             Some(port) => port
                 .parse()
                 .map_err(|_| "GRIDFPV_SERVER_SMTP_PORT is not a port number.")?,
-            None if tls == MailTls::Tls => 465,
-            None => 587,
+            None => usual_port(tls),
         };
         Ok(Some(Self {
             host,
@@ -288,10 +351,43 @@ fn server_name(state: &AppState) -> String {
         .unwrap_or_else(|| "a Grid server".to_owned())
 }
 
+/// A mailer, and the settings it was made from.
+pub type Made = (MailSettings, Arc<Mailer>);
+
+/// What sends this server's email now: the account an owner set on the page, or else the
+/// one in the environment. `None` when neither is there.
+///
+/// The page's settings are read each time, so a change is used at once. The mailer for
+/// them is kept while they stay the same.
+pub fn mailer_now(state: &AppState) -> Option<Arc<Mailer>> {
+    let mut kept = state.page_mailer.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(settings) = state.book.mail() else {
+        // Nothing on the page any more: let go of the connection made for it.
+        *kept = None;
+        return state.mailer.clone();
+    };
+    if let Some((made_from, mailer)) = kept.as_ref()
+        && *made_from == settings
+    {
+        return Some(mailer.clone());
+    }
+    match Mailer::smtp(&settings) {
+        Ok(mailer) => {
+            let mailer = Arc::new(mailer);
+            *kept = Some((settings, mailer.clone()));
+            Some(mailer)
+        }
+        Err(why) => {
+            eprintln!("gridfpv-server: the email settings on the page do not work: {why}");
+            None
+        }
+    }
+}
+
 /// The mailer and the server's own address, or why no mail can be sent.
 fn ready(state: &AppState) -> Result<(Arc<Mailer>, String), ApiError> {
-    match (&state.mailer, &state.public_url) {
-        (Some(mailer), Some(url)) => Ok((mailer.clone(), url.clone())),
+    match (mailer_now(state), &state.public_url) {
+        (Some(mailer), Some(url)) => Ok((mailer, url.clone())),
         _ => Err(no_mail()),
     }
 }
@@ -335,6 +431,189 @@ pub struct EmailConfirmed {
 pub struct Forgot {
     /// A username, or an email address.
     pub who: String,
+}
+
+/// Where a server's email settings come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+#[serde(rename_all = "lowercase")]
+pub enum MailSource {
+    /// An owner set them on the page.
+    Page,
+    /// They are in the server's environment (`GRIDFPV_SERVER_SMTP_*`).
+    Env,
+    /// Nowhere: this server sends no email.
+    Off,
+}
+
+/// The email account a server sends from, as an owner is shown it. The password is
+/// never here: only whether there is one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerEmail {
+    pub source: MailSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tls: Option<MailTls>,
+    /// Whether a password is kept for the account.
+    pub password_set: bool,
+    /// Whether the server knows its own address, which a link in a mail needs
+    /// (`GRIDFPV_SERVER_PUBLIC_URL`). Without it no mail is sent.
+    pub knows_address: bool,
+}
+
+/// `PUT /api/server/email`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerEmailChange {
+    pub host: String,
+    /// Left out, it is the usual port for the kind of TLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub user: Option<String>,
+    /// Left out, the password already kept stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub password: Option<String>,
+    /// Who the mail is from, such as `Grid <grid@example.org>`.
+    pub from: String,
+    /// Left out, it is STARTTLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tls: Option<MailTls>,
+}
+
+/// `POST /api/server/email/test`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerEmailTest {
+    pub to: String,
+}
+
+/// The email account in use, as an owner is shown it.
+fn server_email(state: &AppState) -> ServerEmail {
+    let page = state.book.mail();
+    let (source, settings) = match (&page, &state.env_mail) {
+        (Some(settings), _) => (MailSource::Page, Some(settings)),
+        (None, Some(settings)) => (MailSource::Env, Some(settings.as_ref())),
+        // A stand-in mailer has no settings to show.
+        (None, None) if state.mailer.is_some() => (MailSource::Env, None),
+        (None, None) => (MailSource::Off, None),
+    };
+    ServerEmail {
+        source,
+        host: settings.map(|s| s.host.clone()),
+        port: settings.map(|s| s.port),
+        user: settings.and_then(|s| s.user.clone()),
+        from: settings.map(|s| s.from.clone()),
+        tls: settings.map(|s| s.tls),
+        password_set: settings.is_some_and(|s| s.password.is_some()),
+        knows_address: state.public_url.is_some(),
+    }
+}
+
+/// Only an owner sees or changes how the server sends email.
+fn owner_only(standing: &Standing) -> Result<(), ApiError> {
+    if standing.may(Act::RunServer) {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        StatusCode::FORBIDDEN,
+        ErrorCode::Forbidden,
+        "Only an owner of this server can do that.",
+    ))
+}
+
+/// `GET /api/server/email`.
+pub async fn get_server_email(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+) -> Result<Json<ServerEmail>, ApiError> {
+    owner_only(&standing)?;
+    Ok(Json(server_email(&state)))
+}
+
+/// `PUT /api/server/email`: set the account the server sends from. It is used from the
+/// next mail on. Nothing is sent to check it: that is what the test is for.
+pub async fn put_server_email(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Json(change): Json<ServerEmailChange>,
+) -> Result<Json<ServerEmail>, ApiError> {
+    owner_only(&standing)?;
+    let kept = state.book.mail().and_then(|held| held.password);
+    let settings = MailSettings::from_page(change, kept).map_err(ApiError::bad)?;
+    // Settings no mailer can be made from are not kept.
+    Mailer::smtp(&settings).map_err(ApiError::bad)?;
+    state
+        .book
+        .set_mail(Some(settings))
+        .map_err(crate::manage::book_error)?;
+    Ok(Json(server_email(&state)))
+}
+
+/// `DELETE /api/server/email`: forget what was set on the page. Settings in the
+/// environment, if there are any, are used again.
+pub async fn delete_server_email(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+) -> Result<Json<ServerEmail>, ApiError> {
+    owner_only(&standing)?;
+    state
+        .book
+        .set_mail(None)
+        .map_err(crate::manage::book_error)?;
+    Ok(Json(server_email(&state)))
+}
+
+/// `POST /api/server/email/test`: send one mail with the settings in use. An owner is
+/// told why in the email server's own words when it does not go.
+pub async fn post_server_email_test(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Json(test): Json<ServerEmailTest>,
+) -> Result<StatusCode, ApiError> {
+    owner_only(&standing)?;
+    let Some(mailer) = mailer_now(&state) else {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Refused,
+            "Email is not set up yet. Save the settings first.",
+        ));
+    };
+    let to = clean_address(&test.to)?;
+    if !state.sent.may(&standing.account, "test", TEST_EVERY) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::Refused,
+            "A test was sent a moment ago. Wait a few seconds before sending another.",
+        ));
+    }
+    let mail = Mail {
+        to,
+        subject: "A test from your Grid server".into(),
+        body: "This is a test. If you can read it, your Grid server can send email.\n".into(),
+    };
+    mailer
+        .send(mail)
+        .await
+        .map_err(|why| ApiError::new(StatusCode::BAD_GATEWAY, ErrorCode::Refused, why))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// An account's address, for its own page.

@@ -129,14 +129,10 @@ fn serve() -> Done {
     let dir = data_dir();
     // Settings for email that do not make sense stop the server from starting: a server
     // that silently sent nothing would be found out only when someone needed a link.
-    let mailer = match gridfpv_serverd::email::MailSettings::from_env()? {
-        Some(settings) => Some(gridfpv_serverd::email::Mailer::smtp(&settings)?),
-        None => None,
-    };
     let state = AppState::open(&dir)?
         .at(public_url())
         .with_providers(gridfpv_serverd::signin::Provider::from_env())
-        .with_mailer(mailer);
+        .with_mail_settings(gridfpv_serverd::email::MailSettings::from_env()?)?;
     let asked = std::env::var_os("GRIDFPV_SERVER_ASSETS")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from);
@@ -168,7 +164,7 @@ fn serve() -> Done {
         if state.book.password_sign_in() {
             println!("  sign-in with a username and password");
         }
-        match (&state.mailer, &state.public_url) {
+        match (gridfpv_serverd::email::mailer_now(&state), &state.public_url) {
             (Some(_), Some(_)) => println!("  email is set up"),
             (Some(_), None) => println!(
                 "  Email is off: set GRIDFPV_SERVER_PUBLIC_URL, so a link in a mail can be opened."
@@ -363,11 +359,16 @@ fn account_reconnect(id: &str) -> Done {
     Ok(())
 }
 
-/// Send one email with the settings in the environment, to check they work.
+/// Send one email with the settings in use, to check they work.
 fn email_test(to: &str) -> Done {
     use gridfpv_serverd::email::{Mail, MailSettings, Mailer};
-    let Some(settings) = MailSettings::from_env()? else {
-        return Err("Email is not set up: GRIDFPV_SERVER_SMTP_HOST is not set.".into());
+    // What an owner set on the page wins, as it does in the server itself.
+    let on_page = Book::open(&data_dir())?.mail();
+    let Some(settings) = on_page.map_or_else(MailSettings::from_env, |s| Ok(Some(s)))? else {
+        return Err(
+            "Email is not set up. Set it on the server's Email page, or set GRIDFPV_SERVER_SMTP_HOST."
+                .into(),
+        );
     };
     let mailer = Mailer::smtp(&settings)?;
     let mail = Mail {

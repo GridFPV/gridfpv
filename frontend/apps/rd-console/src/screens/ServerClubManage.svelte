@@ -92,8 +92,11 @@
 
   // ── The name ───────────────────────────────────────────────────────────────
   let name = $state('');
+  // Only a new name puts the box back. The page hands the club over afresh each time it
+  // reads its lists, and that must not wipe out what is being typed.
+  const clubName = $derived(club.name);
   $effect(() => {
-    name = club.name;
+    name = clubName;
   });
   const canRename = $derived(name.trim() !== '' && name.trim() !== club.name);
 

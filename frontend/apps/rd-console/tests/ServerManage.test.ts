@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import type { MyAccount, PushClub, ServerEvent } from '@gridfpv/types';
+import ServerClubManage from '../src/screens/ServerClubManage.svelte';
 import ServerHome from '../src/screens/ServerHome.svelte';
 import { tokenStanding } from '../src/lib/serverPeople.js';
 import { eventView } from './competition.js';
@@ -409,6 +410,26 @@ describe("a club's name", () => {
     await waitFor(() => expect(screen.getByText('Northern Lights')).toBeVisible());
     await waitFor(() => expect(box.value).toBe('Northern Lights'));
     expect(save.disabled).toBe(true);
+  });
+
+  it('keeps what is being typed when the page reads its lists again', async () => {
+    const people = fakePeople(fakeServer({ account: ACE }));
+    const view = render(ServerClubManage, {
+      api: people,
+      club: { id: 'north', name: 'North FPV' },
+      section: 'settings'
+    });
+    const box = (await screen.findByLabelText('Name')) as HTMLInputElement;
+    await fireEvent.input(box, { target: { value: 'Northern Li' } });
+    // The same club, handed over again as a list that was read again has it.
+    await view.rerender({ club: { id: 'north', name: 'North FPV' } });
+    expect(box.value).toBe('Northern Li');
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(
+      false
+    );
+    // A new name from the server does put the box right.
+    await view.rerender({ club: { id: 'north', name: 'Northern Lights' } });
+    await waitFor(() => expect(box.value).toBe('Northern Lights'));
   });
 
   it('follows the club to its new address when its name changes', async () => {

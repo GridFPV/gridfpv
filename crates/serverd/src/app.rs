@@ -44,6 +44,10 @@ pub struct AppState {
     pub guesses: Arc<crate::password::Guesses>,
     /// What sends this server's email, when its owner set that up (`email`).
     pub mailer: Option<Arc<crate::email::Mailer>>,
+    /// The settings that mailer was made from, to show an owner. `None` for a stand-in.
+    pub env_mail: Option<Arc<crate::email::MailSettings>>,
+    /// The mailer for the settings an owner gave on the page, kept while they stay the same.
+    pub page_mailer: Arc<std::sync::Mutex<Option<crate::email::Made>>>,
     /// When each account was last sent a mail (`email`).
     pub sent: Arc<crate::email::Sent>,
 }
@@ -63,6 +67,18 @@ impl AppState {
     pub fn with_mailer(mut self, mailer: Option<crate::email::Mailer>) -> Self {
         self.mailer = mailer.map(Arc::new);
         self
+    }
+
+    /// Send email with the settings in the environment, when they are there.
+    pub fn with_mail_settings(
+        mut self,
+        settings: Option<crate::email::MailSettings>,
+    ) -> Result<Self, String> {
+        if let Some(settings) = settings {
+            self.mailer = Some(Arc::new(crate::email::Mailer::smtp(&settings)?));
+            self.env_mail = Some(Arc::new(settings));
+        }
+        Ok(self)
     }
 
     /// Say which providers people can sign in with.
@@ -85,6 +101,8 @@ impl AppState {
             asks: Arc::default(),
             guesses: Arc::default(),
             mailer: None,
+            env_mail: None,
+            page_mailer: Arc::default(),
             sent: Arc::default(),
         })
     }
@@ -250,6 +268,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/me/email",
             axum::routing::put(crate::email::put_my_email).delete(crate::email::delete_my_email),
+        )
+        .route(
+            "/api/server/email",
+            get(crate::email::get_server_email)
+                .put(crate::email::put_server_email)
+                .delete(crate::email::delete_server_email),
+        )
+        .route(
+            "/api/server/email/test",
+            axum::routing::post(crate::email::post_server_email_test),
         )
         .route(
             "/api/email/confirm",
