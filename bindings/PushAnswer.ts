@@ -7,4 +7,9 @@ export type PushAnswer = {
 /**
  * Why it was not done, in words for the pilot. Left out when it was done.
  */
-refused?: string, };
+refused?: string, 
+/**
+ * The refusal is about the race code: none was sent, or it was not right (§13.13).
+ * The page then asks the pilot for the code, where any other refusal is only shown.
+ */
+needs_code?: boolean, };

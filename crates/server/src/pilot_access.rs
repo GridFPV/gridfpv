@@ -137,6 +137,40 @@ struct Stored {
     /// The number the last kiosk got. Numbers are not used twice.
     #[serde(default)]
     last_kiosk: u32,
+    /// Each event's race code (docs/primitives.md §13.13): shown at the race, and typed by
+    /// a pilot who checks in to a seat from the server, to show they are there.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    race_codes: BTreeMap<EventId, String>,
+}
+
+/// How many wrong race codes in a row a pilot may send before they must wait.
+pub const RACE_CODE_TRIES: u32 = 5;
+
+/// How long a pilot waits after that many wrong race codes.
+pub const RACE_CODE_WAIT: Duration = Duration::from_secs(60);
+
+/// Why a race code was not taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaceCodeRefusal {
+    /// None was sent.
+    Missing,
+    /// It is not this event's code. It may be an old one.
+    Wrong,
+    /// Too many wrong ones in a row. Wait and try again.
+    TooMany,
+}
+
+impl RaceCodeRefusal {
+    /// In words, for the pilot.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Missing => "Type the race code first. The director shows it at the race.",
+            Self::Wrong => {
+                "That is not the race code. Look at the code the director shows at the race, and type it again."
+            }
+            Self::TooMany => "Too many wrong race codes. Wait a minute, then try again.",
+        }
+    }
 }
 
 struct Inner {
@@ -144,6 +178,9 @@ struct Inner {
     stored: Stored,
     /// Kiosk passes, by token. Kept in memory only.
     kiosk: HashMap<String, KioskPass>,
+    /// Wrong race codes in a row, by event and pilot, and when the last one was. Kept in
+    /// memory only.
+    race_tries: HashMap<(EventId, PilotId), (u32, Instant)>,
 }
 
 /// One pilot's code, as the director's console shows it.
@@ -264,6 +301,7 @@ impl PilotAccess {
                 file,
                 stored,
                 kiosk: HashMap::new(),
+                race_tries: HashMap::new(),
             })),
         }
     }
@@ -705,8 +743,86 @@ impl PilotAccess {
     pub fn forget(&self, event: &EventId) {
         let mut inner = self.write();
         inner.kiosk.retain(|_, pass| pass.event != *event);
-        if inner.stored.events.remove(event).is_some() {
+        inner.race_tries.retain(|(of, _), _| of != event);
+        let codes = inner.stored.events.remove(event).is_some();
+        let race = inner.stored.race_codes.remove(event).is_some();
+        if codes || race {
             Self::save(&inner);
+        }
+    }
+
+    // ── The race code (§13.13) ──────────────────────────────────────────────
+
+    /// The event's race code. One is made the first time it is asked for.
+    pub fn race_code(&self, event: &EventId) -> String {
+        if let Some(code) = self.read().stored.race_codes.get(event) {
+            return code.clone();
+        }
+        let mut inner = self.write();
+        let code = inner
+            .stored
+            .race_codes
+            .entry(event.clone())
+            .or_insert_with(random_code)
+            .clone();
+        Self::save(&inner);
+        code
+    }
+
+    /// Give the event a new race code. The old one stops working at once, and every
+    /// pilot's count of wrong tries starts again.
+    pub fn new_race_code(&self, event: &EventId) -> String {
+        let mut inner = self.write();
+        let before = inner.stored.race_codes.get(event).cloned();
+        let code = loop {
+            let code = random_code();
+            if Some(&code) != before.as_ref() {
+                break code;
+            }
+        };
+        inner.stored.race_codes.insert(event.clone(), code.clone());
+        inner.race_tries.retain(|(of, _), _| of != event);
+        Self::save(&inner);
+        code
+    }
+
+    /// Whether what a pilot typed is the event's race code, as of `now`.
+    ///
+    /// An event whose director never looked at its code has none, and then nothing is
+    /// right. After [`RACE_CODE_TRIES`] wrong ones in a row a pilot waits
+    /// [`RACE_CODE_WAIT`], and even the right code is not taken until then.
+    pub fn check_race_code(
+        &self,
+        event: &EventId,
+        pilot: &PilotId,
+        typed: Option<&str>,
+        now: Instant,
+    ) -> Result<(), RaceCodeRefusal> {
+        let Some(typed) = typed.filter(|typed| !typed.trim().is_empty()) else {
+            return Err(RaceCodeRefusal::Missing);
+        };
+        let mut inner = self.write();
+        let key = (event.clone(), pilot.clone());
+        if let Some((tries, last)) = inner.race_tries.get(&key).copied()
+            && tries >= RACE_CODE_TRIES
+        {
+            if now.saturating_duration_since(last) < RACE_CODE_WAIT {
+                return Err(RaceCodeRefusal::TooMany);
+            }
+            inner.race_tries.remove(&key);
+        }
+        let right = match (normalize(typed), inner.stored.race_codes.get(event)) {
+            (Some(typed), Some(code)) => same(&typed, code),
+            _ => false,
+        };
+        if right {
+            inner.race_tries.remove(&key);
+            Ok(())
+        } else {
+            let entry = inner.race_tries.entry(key).or_insert((0, now));
+            entry.0 += 1;
+            entry.1 = now;
+            Err(RaceCodeRefusal::Wrong)
         }
     }
 }
@@ -894,6 +1010,109 @@ pub async fn get_qr(
             // A new code must show at once.
             (CACHE_CONTROL, "no-store"),
             // An SVG is a document: it may draw, and nothing more.
+            (
+                CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            ),
+        ],
+        svg,
+    )
+        .into_response())
+}
+
+/// The event's race code, as the director's console shows it (docs/primitives.md §13.13).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RaceCodeView {
+    /// What a pilot types on the server's page to show they are at the race.
+    pub code: String,
+    /// The event's page on the linked server, with the code in it: what the QR code
+    /// holds. Left out while no server is linked and connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub link: Option<String>,
+}
+
+/// The link a race code's QR holds: the event's page on the server, with the code after
+/// the `#`, where it is never sent to anyone but the page itself.
+pub fn here_link(server: &str, club: &str, event: &EventId, code: &str) -> String {
+    format!(
+        "{}/#/here/{club}/{}/{code}",
+        server.trim_end_matches('/'),
+        event.0
+    )
+}
+
+fn race_code_view(registry: &EventRegistry, event: &EventId, code: String) -> RaceCodeView {
+    let link = registry.link().view();
+    let link = link
+        .club
+        .as_ref()
+        .map(|club| here_link(&link.url, &club.id, event, &code));
+    RaceCodeView { code, link }
+}
+
+/// `GET /events/{event_id}/race-code` — the event's race code. For the director only: the
+/// gate keeps visitors out of everything under `/events`.
+pub async fn get_race_code(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Response, ProtocolError> {
+    if registry.meta_of(&event_id).is_none() {
+        return Err(unknown_event(&event_id));
+    }
+    let code = registry.pilot_access().race_code(&event_id);
+    Ok((
+        [(CACHE_CONTROL, "no-store")],
+        Json(race_code_view(&registry, &event_id, code)),
+    )
+        .into_response())
+}
+
+/// `POST /events/{event_id}/race-code/new` — a new race code. The old one stops working.
+pub async fn post_new_race_code(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Response, ProtocolError> {
+    if registry.meta_of(&event_id).is_none() {
+        return Err(unknown_event(&event_id));
+    }
+    let code = registry.pilot_access().new_race_code(&event_id);
+    Ok((
+        [(CACHE_CONTROL, "no-store")],
+        Json(race_code_view(&registry, &event_id, code)),
+    )
+        .into_response())
+}
+
+/// `GET /events/{event_id}/race-code/qr` — the race code as a QR picture. It holds a link
+/// to the event's page on the server with the code in it. `409` while no server is linked
+/// and connected: there is no page to send a pilot to.
+pub async fn get_race_code_qr(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Response, ProtocolError> {
+    if registry.meta_of(&event_id).is_none() {
+        return Err(unknown_event(&event_id));
+    }
+    let code = registry.pilot_access().race_code(&event_id);
+    let Some(link) = race_code_view(&registry, &event_id, code).link else {
+        return Err(ProtocolError::new(
+            ErrorCode::Refused,
+            "Grid is not connected to a server. Link one on the Server page to get a QR code.",
+        ));
+    };
+    let svg = qr_svg(&link).map_err(|err| {
+        ProtocolError::new(
+            ErrorCode::Internal,
+            format!("The QR code could not be drawn: {err}"),
+        )
+    })?;
+    Ok((
+        [
+            (CONTENT_TYPE, "image/svg+xml"),
+            (CACHE_CONTROL, "no-store"),
             (
                 CONTENT_SECURITY_POLICY,
                 "default-src 'none'; style-src 'unsafe-inline'; sandbox",
@@ -2251,5 +2470,217 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+    // ── The race code ───────────────────────────────────────────────────────
+
+    fn race_rig() -> (PilotAccess, EventId, PilotId, PilotId) {
+        (
+            PilotAccess::new(None),
+            EventId("friday".into()),
+            PilotId("ace".into()),
+            PilotId("bee".into()),
+        )
+    }
+
+    fn not(code: &str) -> &'static str {
+        if code == "AAAAAA" { "BBBBBB" } else { "AAAAAA" }
+    }
+
+    #[test]
+    fn a_race_code_is_made_once_and_is_one_a_person_can_type() {
+        let (access, event, ..) = race_rig();
+        let code = access.race_code(&event);
+        assert_eq!(code.len(), CODE_LENGTH);
+        assert!(code.bytes().all(|b| CODE_ALPHABET.contains(&b)));
+        assert_eq!(
+            access.race_code(&event),
+            code,
+            "asking again gives the same"
+        );
+        // Another event has a code of its own.
+        let other = EventId("saturday".into());
+        access.race_code(&other);
+        assert_eq!(access.race_code(&event), code);
+    }
+
+    #[test]
+    fn a_race_code_is_right_however_it_is_typed_and_wrong_for_another_event() {
+        let (access, event, ace, _) = race_rig();
+        let code = access.race_code(&event);
+        let now = Instant::now();
+        let typed = format!(" {}-{} ", code[..3].to_lowercase(), &code[3..]);
+        assert_eq!(
+            access.check_race_code(&event, &ace, Some(&code), now),
+            Ok(())
+        );
+        assert_eq!(
+            access.check_race_code(&event, &ace, Some(&typed), now),
+            Ok(())
+        );
+        for missing in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                access.check_race_code(&event, &ace, missing, now),
+                Err(RaceCodeRefusal::Missing)
+            );
+        }
+        // Nothing sent is not a wrong try: it never counts toward the wait.
+        for _ in 0..20 {
+            let _ = access.check_race_code(&event, &ace, None, now);
+        }
+        assert_eq!(
+            access.check_race_code(&event, &ace, Some(&code), now),
+            Ok(())
+        );
+
+        let other = EventId("saturday".into());
+        let theirs = access.race_code(&other);
+        if theirs != code {
+            assert_eq!(
+                access.check_race_code(&event, &ace, Some(&theirs), now),
+                Err(RaceCodeRefusal::Wrong)
+            );
+        }
+    }
+
+    #[test]
+    fn an_event_whose_code_was_never_looked_at_takes_no_code() {
+        let (access, event, ace, _) = race_rig();
+        let now = Instant::now();
+        for typed in ["AAAAAA", "", "ABC234"] {
+            assert!(
+                access
+                    .check_race_code(&event, &ace, Some(typed), now)
+                    .is_err()
+            );
+        }
+        // Checking does not make one.
+        assert!(access.read().stored.race_codes.is_empty());
+    }
+
+    #[test]
+    fn after_too_many_wrong_codes_a_pilot_waits_and_then_may_try_again() {
+        let (access, event, ace, bee) = race_rig();
+        let code = access.race_code(&event);
+        let wrong = not(&code);
+        let start = Instant::now();
+        for _ in 0..RACE_CODE_TRIES {
+            assert_eq!(
+                access.check_race_code(&event, &ace, Some(wrong), start),
+                Err(RaceCodeRefusal::Wrong)
+            );
+        }
+        // Right or wrong, nothing is taken until the wait is over.
+        let just_before = start + RACE_CODE_WAIT - Duration::from_millis(1);
+        for typed in [code.as_str(), wrong] {
+            assert_eq!(
+                access.check_race_code(&event, &ace, Some(typed), just_before),
+                Err(RaceCodeRefusal::TooMany)
+            );
+        }
+        // Asking while waiting does not make the wait longer.
+        assert_eq!(
+            access.check_race_code(&event, &ace, Some(&code), start + RACE_CODE_WAIT),
+            Ok(())
+        );
+        // Another pilot was never held up.
+        assert_eq!(
+            access.check_race_code(&event, &bee, Some(&code), start),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_right_code_or_a_new_code_starts_the_count_of_wrong_tries_again() {
+        let (access, event, ace, _) = race_rig();
+        let code = access.race_code(&event);
+        let wrong = not(&code);
+        let now = Instant::now();
+        for _ in 0..3 {
+            for _ in 0..RACE_CODE_TRIES - 1 {
+                assert_eq!(
+                    access.check_race_code(&event, &ace, Some(wrong), now),
+                    Err(RaceCodeRefusal::Wrong)
+                );
+            }
+            assert_eq!(
+                access.check_race_code(&event, &ace, Some(&code), now),
+                Ok(())
+            );
+        }
+        // Locked out, then the director makes a new code: the pilot may try at once.
+        for _ in 0..RACE_CODE_TRIES {
+            let _ = access.check_race_code(&event, &ace, Some(wrong), now);
+        }
+        assert_eq!(
+            access.check_race_code(&event, &ace, Some(&code), now),
+            Err(RaceCodeRefusal::TooMany)
+        );
+        let new = access.new_race_code(&event);
+        assert_ne!(new, code);
+        assert_eq!(
+            access.check_race_code(&event, &ace, Some(&code), now),
+            Err(RaceCodeRefusal::Wrong),
+            "the old code stopped working"
+        );
+        assert_eq!(
+            access.check_race_code(&event, &ace, Some(&new), now),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_race_code_is_kept_in_the_file_and_goes_with_its_event() {
+        let dir = std::env::temp_dir().join(format!(
+            "gridfpv-race-code-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let event = EventId("friday".into());
+        let code = PilotAccess::new(Some(dir.clone())).race_code(&event);
+        let again = PilotAccess::new(Some(dir.clone()));
+        assert_eq!(again.race_code(&event), code);
+        let new = again.new_race_code(&event);
+        assert_eq!(PilotAccess::new(Some(dir.clone())).race_code(&event), new);
+
+        again.forget(&event);
+        let after = PilotAccess::new(Some(dir.clone()));
+        assert!(after.read().stored.race_codes.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_before_race_codes_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "gridfpv-race-code-old-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(ACCESS_FILE),
+            r#"{"events":{"friday":{"ace":{"code":"ABC234"}}},"last_kiosk":2}"#,
+        )
+        .unwrap();
+        let access = PilotAccess::new(Some(dir.clone()));
+        let inner = access.read();
+        assert_eq!(inner.stored.last_kiosk, 2);
+        assert_eq!(inner.stored.events.len(), 1);
+        assert!(inner.stored.race_codes.is_empty());
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_link_in_a_race_codes_qr_has_the_code_after_the_hash() {
+        assert_eq!(
+            here_link(
+                "https://grid.example.org/",
+                "club",
+                &EventId("friday".into()),
+                "ABC234"
+            ),
+            "https://grid.example.org/#/here/club/friday/ABC234"
+        );
     }
 }

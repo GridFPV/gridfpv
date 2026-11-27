@@ -66,6 +66,7 @@ import type {
   PullRequest,
   PublicPilot,
   PushClub,
+  RaceCodeView,
   RaceId,
   RaceSignal,
   RenameTimerRequest,
@@ -1483,6 +1484,67 @@ export async function endPilotSession(
     eventPath(event, `/access/${encodeURIComponent(pilot)}/session`),
     { method: 'DELETE', token, fetch: options.fetch },
     "sign the pilot's device out"
+  );
+}
+
+/**
+ * The event's race code (`GET /events/{id}/race-code`): what a pilot types on the server's
+ * page to show they are at the race. For the director: a visitor is refused.
+ */
+export async function getRaceCode(
+  baseUrl: string,
+  event: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<RaceCodeView> {
+  return apiJson<RaceCodeView>(
+    baseUrl,
+    eventPath(event, '/race-code'),
+    options,
+    'read the race code'
+  );
+}
+
+/** Give the event a new race code; the old one stops working. RD-gated. */
+export async function newRaceCode(
+  baseUrl: string,
+  event: EventId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<RaceCodeView> {
+  return apiJson<RaceCodeView>(
+    baseUrl,
+    eventPath(event, '/race-code/new'),
+    { method: 'POST', token, fetch: options.fetch },
+    'make a new race code'
+  );
+}
+
+/** Where the race code's QR picture is served from, for an `<img>`. */
+export function raceCodeQrUrl(baseUrl: string, event: EventId): string {
+  return `${trimSlash(baseUrl)}${eventPath(event, '/race-code/qr')}`;
+}
+
+/**
+ * A signed-in pilot checks in to an open seat from a remote server's page
+ * (`POST …/public/pilot/checkin/take`), with the race code that shows they are at the race.
+ * `baseUrl` is the event's own base on the server ({@link serverEventBase}).
+ */
+export async function takeSeatOnServer(
+  baseUrl: string,
+  race: RaceId,
+  seat: { adapter: string; seat: string },
+  code: string | undefined,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/pilot/checkin/take',
+    {
+      method: 'POST',
+      body: { race, adapter: seat.adapter, seat: seat.seat, ...(code ? { code } : {}) },
+      fetch: options.fetch
+    },
+    'take the seat'
   );
 }
 

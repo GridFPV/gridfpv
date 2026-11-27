@@ -74,6 +74,15 @@ has a short **code** for it.
 The codes are on the event's **Pilot codes** page, next to Details in the menu. Press
 **Show codes** there. The codes stay hidden until you do, so a screen left open shows none.
 
+### The race code
+
+Under the pilots' codes is one **Race code** for the whole event. It is only used when
+Grid is linked to a [server](#/help/server). A pilot who takes an open seat from the
+server's page types it once, to show they are at the race.
+
+Press **Show** to see it, and **Show the QR code** to let pilots scan it. Press **New
+code** if it got out.
+
 ### Printing the codes
 
 Press **Print** on the Pilot codes page to make a sheet to cut up and hand out. Each pilot

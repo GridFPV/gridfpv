@@ -202,6 +202,19 @@ pub fn router(registry: EventRegistry) -> Router {
             "/events/{event_id}/access/{pilot_id}/qr",
             get(crate::pilot_access::get_qr),
         )
+        // The race code (§13.13): proof a pilot checking in from the server is at the race.
+        .route(
+            "/events/{event_id}/race-code",
+            get(crate::pilot_access::get_race_code),
+        )
+        .route(
+            "/events/{event_id}/race-code/new",
+            post(crate::pilot_access::post_new_race_code),
+        )
+        .route(
+            "/events/{event_id}/race-code/qr",
+            get(crate::pilot_access::get_race_code_qr),
+        )
         .route(
             "/public/pilot/session",
             post(crate::pilot_access::post_session).delete(crate::pilot_access::delete_session),

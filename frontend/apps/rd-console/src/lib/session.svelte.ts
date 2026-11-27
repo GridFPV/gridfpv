@@ -89,6 +89,9 @@ import {
   resetPilotCode,
   endPilotSession,
   pilotQrUrl,
+  getRaceCode,
+  newRaceCode,
+  raceCodeQrUrl,
   signInPilot,
   signOutPilot,
   signInDirector,
@@ -144,6 +147,7 @@ import type {
   Pilot,
   PilotAccessView,
   PilotCodeView,
+  RaceCodeView,
   PilotId,
   PullRequest,
   PublicHello,
@@ -288,6 +292,9 @@ const realApi = {
   resetPilotCode,
   endPilotSession,
   pilotQrUrl,
+  getRaceCode,
+  newRaceCode,
+  raceCodeQrUrl,
   signInPilot,
   signOutPilot,
   signInDirector,
@@ -703,6 +710,21 @@ export class Session {
       await this.#api.endPilotSession(this.baseUrl, event, pilot, token);
       return true as const;
     });
+  }
+
+  /** The event's race code, for pilots who check in from the server. For the director. */
+  getRaceCode(event: EventMeta['id']): Promise<RaceCodeView> {
+    return this.#api.getRaceCode(this.baseUrl, event, { token: this.#token });
+  }
+
+  /** Give the event a new race code. `undefined` on a cancelled prompt. */
+  newRaceCode(event: EventMeta['id']): Promise<RaceCodeView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.newRaceCode(this.baseUrl, event, token));
+  }
+
+  /** Where the race code's QR picture is served from. */
+  raceCodeQrUrl(event: EventMeta['id']): string {
+    return this.#api.raceCodeQrUrl(this.baseUrl, event);
   }
 
   /** Where a pilot's QR code picture is served from. */

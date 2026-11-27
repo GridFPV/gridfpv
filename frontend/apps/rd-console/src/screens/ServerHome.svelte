@@ -11,14 +11,32 @@
    * event has it (§13.4). What they ask for goes to the Director, which decides it as it
    * would at the race. Nothing else can be changed from this page.
    */
-  import { Badge, Card } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Dialog, Input } from '@gridfpv/components';
   import {
+    dropSeat,
     getServerEvent,
     listServerClubs,
     listServerEvents,
-    serverEventBase
+    serverEventBase,
+    takeSeatOnServer
   } from '@gridfpv/protocol-client';
-  import type { MyAccount, PushClub, ServerEvent, SignInProvider } from '@gridfpv/types';
+  import type {
+    AdapterId,
+    MyAccount,
+    PushClub,
+    RaceId,
+    SeatRef,
+    ServerEvent,
+    SignInProvider
+  } from '@gridfpv/types';
+  import { codeProblem } from '../lib/pilotAccess.js';
+  import {
+    dropRaceCode,
+    keepRaceCode,
+    keptRaceCode,
+    needsRaceCode,
+    type CodeStore
+  } from '../lib/raceCode.js';
   import { EventLive, type LiveSession } from '../lib/eventLive.svelte.js';
   import {
     eventDetail,
@@ -40,6 +58,18 @@
   type EventSource = LiveSession &
     Partial<Pick<PublicSource, 'takeSpot' | 'takeNextSpot' | 'leaveSpot'>>;
 
+  /** How a pilot asks the Director for an open seat from here, and gives one up. */
+  interface SeatAsks {
+    take(
+      club: string,
+      event: string,
+      race: RaceId,
+      seat: { adapter: AdapterId; seat: SeatRef },
+      code: string | undefined
+    ): Promise<unknown>;
+    drop(club: string, event: string, race: RaceId): Promise<unknown>;
+  }
+
   /** How long a pilot's change may take to come back from the Director, in milliseconds. */
   const BACK_WITHIN_MS = 4_000;
 
@@ -55,7 +85,13 @@
     },
     sourceFor = (club: string, event: string) =>
       publicSource(serverEventBase(baseUrl, club, event)),
-    people = peopleApi(baseUrl)
+    people = peopleApi(baseUrl),
+    seats = {
+      take: (club, event, race, seat, code) =>
+        takeSeatOnServer(serverEventBase(baseUrl, club, event), race, seat, code),
+      drop: (club, event, race) => dropSeat(serverEventBase(baseUrl, club, event), race)
+    },
+    codes = undefined
   }: {
     /** The server's address. */
     baseUrl: string;
@@ -73,6 +109,13 @@
     sourceFor?: (club: string, event: string) => EventSource;
     /** Accounts: who is signed in, invites, members. A test passes its own. */
     people?: PeopleApi;
+    /**
+     * How a pilot asks the Director for an open seat, and gives one up (§11.9, §13.13).
+     * `take` carries the race code the pilot typed. A test passes its own.
+     */
+    seats?: SeatAsks;
+    /** Where the race code is kept in this browser. A test passes its own. */
+    codes?: CodeStore;
   } = $props();
 
   // ── Who is signed in ───────────────────────────────────────────────────────
@@ -165,6 +208,16 @@
   const total = $derived(clubs?.reduce((sum, club) => sum + club.events.length, 0) ?? 0);
 
   // ── The event that is open on the page ─────────────────────────────────────
+  // A link from the race code's QR: keep the code in this browser, and go on to the event.
+  // The code is taken out of the address, so it is not left in the history or shared on.
+  $effect(() => {
+    if (place.kind !== 'here') return;
+    keepRaceCode(place.club, place.event, place.code, codes);
+    const to = formatServerHash({ kind: 'event', club: place.club, event: place.event });
+    history.replaceState(null, '', to);
+    place = parseServerHash(to);
+  });
+
   const picked = $derived(place.kind === 'event' ? place : undefined);
   const pickedKey = $derived(picked ? `${picked.club}/${picked.event}` : undefined);
   /** The picked event as the list knows it. */
@@ -266,6 +319,99 @@
         }
       : undefined
   );
+
+  // ── A pilot checking in to an open seat (§11.9, §13.13) ─────────────────────
+  /**
+   * The seat a pilot asked for and the race code is still needed for: none is kept in
+   * this browser, or the Director said the one sent is not right.
+   */
+  let wanting = $state<
+    | {
+        club: string;
+        event: string;
+        race: RaceId;
+        seat: { adapter: AdapterId; seat: SeatRef };
+        /** What the Director said about the last code, if one was sent. */
+        why?: string;
+        done: () => void;
+      }
+    | undefined
+  >(undefined);
+  let typed = $state('');
+  let codeBusy = $state(false);
+
+  /** Ask for a seat with a code. `false` when the Director wants another code. */
+  async function takeWith(
+    at: { club: string; event: string },
+    race: RaceId,
+    seat: { adapter: AdapterId; seat: SeatRef },
+    code: string
+  ): Promise<string | true> {
+    const before = live?.view?.cursor;
+    try {
+      await seats.take(at.club, at.event, race, seat, code);
+    } catch (err) {
+      if (!needsRaceCode(err)) throw err;
+      dropRaceCode(at.club, at.event, codes);
+      return err instanceof Error ? err.message : String(err);
+    }
+    keepRaceCode(at.club, at.event, code, codes);
+    await comeBack(before);
+    return true;
+  }
+
+  const checkin = $derived(
+    pilot && picked
+      ? {
+          take: async (race: RaceId, seat: { adapter: AdapterId; seat: SeatRef }) => {
+            const at = { club: picked.club, event: picked.event };
+            const kept = keptRaceCode(at.club, at.event, codes);
+            let why: string | undefined;
+            if (kept) {
+              const got = await takeWith(at, race, seat, kept);
+              if (got === true) return;
+              // The code kept here is an old one. Say so, and ask for the new one.
+              why = got;
+            }
+            typed = '';
+            await new Promise<void>((done) => {
+              wanting = { ...at, race, seat, why, done };
+            });
+          },
+          drop: sent((race: RaceId) => seats.drop(picked.club, picked.event, race))
+        }
+      : undefined
+  );
+
+  const typedProblem = $derived(typed.trim() === '' ? undefined : codeProblem(typed));
+
+  async function sendCode(e: Event) {
+    e.preventDefault();
+    const want = wanting;
+    if (!want || codeBusy || typed.trim() === '' || typedProblem) return;
+    codeBusy = true;
+    try {
+      const got = await takeWith(want, want.race, want.seat, typed);
+      if (got === true) {
+        wanting = undefined;
+        want.done();
+      } else {
+        wanting = { ...want, why: got };
+      }
+    } catch (err) {
+      // Not about the code: the Director's own reason. It is shown, and the code that
+      // was typed may well be right, so it is kept for the next try.
+      wanting = { ...want, why: err instanceof Error ? err.message : String(err) };
+    } finally {
+      codeBusy = false;
+    }
+  }
+
+  function stopWanting() {
+    const want = wanting;
+    wanting = undefined;
+    want?.done();
+  }
 </script>
 
 <main class="server">
@@ -388,7 +534,7 @@
         {/if}
       {/if}
       {#if live}
-        <SpectatorView {live} {pilot} {signup} />
+        <SpectatorView {live} {pilot} {signup} {checkin} />
       {/if}
     {/if}
   {:else if clubs === undefined}
@@ -424,7 +570,50 @@
   {/if}
 </main>
 
+{#if wanting}
+  <Dialog open={true} title="Are you at the race?" onclose={stopWanting}>
+    <form id="race-code-form" class="race-code" onsubmit={sendCode}>
+      <p>
+        Taking a seat is for pilots who are at the race. Type the <strong>race code</strong>
+        the director shows there. You only need to do this once.
+      </p>
+      {#if wanting.why}
+        <Banner tone="danger"><span data-testid="race-code-why">{wanting.why}</span></Banner>
+      {/if}
+      <label for="race-code">Race code</label>
+      <Input
+        id="race-code"
+        autocomplete="off"
+        autocapitalize="characters"
+        spellcheck={false}
+        maxlength={12}
+        bind:value={typed}
+        disabled={codeBusy}
+      />
+      {#if typedProblem}<p class="muted" role="status">{typedProblem}</p>{/if}
+    </form>
+    {#snippet footer()}
+      <Button variant="ghost" onclick={stopWanting}>Cancel</Button>
+      <Button
+        variant="primary"
+        type="submit"
+        form="race-code-form"
+        disabled={codeBusy || typed.trim() === '' || typedProblem !== undefined}
+        >Take the seat</Button
+      >
+    {/snippet}
+  </Dialog>
+{/if}
+
 <style>
+  .race-code {
+    display: grid;
+    gap: var(--gf-space-3);
+    max-width: 28rem;
+  }
+  .race-code p {
+    margin: 0;
+  }
   .server {
     max-width: 40rem;
     margin: 0 auto;

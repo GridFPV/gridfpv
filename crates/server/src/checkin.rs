@@ -14,13 +14,13 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use gridfpv_events::{AdapterId, Command, Event, RaceId, SeatRef};
+use gridfpv_events::{AdapterId, Command, Event, PilotId, RaceId, SeatRef};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::control::{CommandOutcome, with_event};
 use crate::error::{ErrorCode, ProtocolError};
-use crate::events::EventRegistry;
+use crate::events::{EventId, EventRegistry};
 
 /// `POST /public/pilot/checkin/take`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -38,37 +38,37 @@ pub struct DropSeatRequest {
     pub race: RaceId,
 }
 
-/// `POST /public/pilot/checkin/take` — the signed-in pilot takes an open seat.
-pub async fn post_take(
-    State(registry): State<EventRegistry>,
-    headers: HeaderMap,
-    Json(body): Json<TakeSeatRequest>,
-) -> Result<Json<CommandOutcome>, ProtocolError> {
-    let (event, pilot) = crate::signup::acting(&registry, &headers)?;
-    with_event(&registry, &event, |session| {
+/// A pilot takes an open seat, for themselves.
+pub fn take(
+    registry: &EventRegistry,
+    event: &EventId,
+    pilot: PilotId,
+    body: TakeSeatRequest,
+) -> Result<CommandOutcome, ProtocolError> {
+    with_event(registry, event, |session| {
         session.commands(vec![Command::Record(Box::new(Event::SeatTaken {
             race: body.race,
             adapter: body.adapter,
             seat: body.seat,
             pilot,
         }))])?;
-        Ok(Json(session.outcome()))
+        Ok(session.outcome())
     })
 }
 
-/// `POST /public/pilot/checkin/drop` — the signed-in pilot gives up the seat they have.
-/// Which seat is worked out here, so a pilot can only ever drop their own.
-pub async fn post_drop(
-    State(registry): State<EventRegistry>,
-    headers: HeaderMap,
-    Json(body): Json<DropSeatRequest>,
-) -> Result<Json<CommandOutcome>, ProtocolError> {
-    let (event, pilot) = crate::signup::acting(&registry, &headers)?;
-    with_event(&registry, &event, |session| {
+/// A pilot gives up the seat they have. Which seat is worked out here, so a pilot can only
+/// ever drop their own.
+pub fn drop_seat(
+    registry: &EventRegistry,
+    event: &EventId,
+    pilot: &PilotId,
+    body: DropSeatRequest,
+) -> Result<CommandOutcome, ProtocolError> {
+    with_event(registry, event, |session| {
         let Some((adapter, seat)) = session
             .state()
             .check_ins
-            .seat_of(&body.race, &pilot)
+            .seat_of(&body.race, pilot)
             .map(|(adapter, seat)| (adapter.clone(), seat.clone()))
         else {
             return Err(ProtocolError::new(
@@ -81,6 +81,26 @@ pub async fn post_drop(
             adapter,
             seat,
         }))])?;
-        Ok(Json(session.outcome()))
+        Ok(session.outcome())
     })
+}
+
+/// `POST /public/pilot/checkin/take` — the signed-in pilot takes an open seat.
+pub async fn post_take(
+    State(registry): State<EventRegistry>,
+    headers: HeaderMap,
+    Json(body): Json<TakeSeatRequest>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    let (event, pilot) = crate::signup::acting(&registry, &headers)?;
+    take(&registry, &event, pilot, body).map(Json)
+}
+
+/// `POST /public/pilot/checkin/drop` — the signed-in pilot gives up the seat they have.
+pub async fn post_drop(
+    State(registry): State<EventRegistry>,
+    headers: HeaderMap,
+    Json(body): Json<DropSeatRequest>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    let (event, pilot) = crate::signup::acting(&registry, &headers)?;
+    drop_seat(&registry, &event, &pilot, body).map(Json)
 }

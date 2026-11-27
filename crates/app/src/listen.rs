@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::link_client::{Client, PushError};
-use gridfpv_server::remote::PushAnswer;
 use tokio::task::JoinHandle;
 
 /// How long the stream may say nothing before it is taken as dead. The server writes at
@@ -36,9 +35,7 @@ pub async fn answer_waiting(registry: &EventRegistry, client: &Client) -> Result
         if registry.meta_of(&request.event).is_none() {
             continue;
         }
-        let answer = PushAnswer {
-            refused: gridfpv_server::signup::decide(registry, &request).err(),
-        };
+        let answer = gridfpv_server::signup::decide(registry, &request);
         // The pilot may have stopped waiting. The log says what was done either way, and
         // it goes up with the next push.
         if client.answer(&request.id, &answer).await? {

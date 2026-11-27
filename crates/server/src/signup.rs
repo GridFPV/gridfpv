@@ -94,14 +94,50 @@ fn run(
 pub fn decide(
     registry: &EventRegistry,
     request: &crate::remote::PushRequest,
-) -> Result<(), String> {
+) -> crate::remote::PushAnswer {
+    use crate::remote::PushAnswer;
+    match decide_ask(registry, request) {
+        Ok(()) => PushAnswer::default(),
+        Err(Declined::Words(why)) => PushAnswer {
+            refused: Some(why),
+            needs_code: false,
+        },
+        Err(Declined::RaceCode(refusal)) => PushAnswer {
+            refused: Some(refusal.words().to_owned()),
+            needs_code: true,
+        },
+    }
+}
+
+/// Why an ask from the server was not done.
+enum Declined {
+    /// In the Director's own words.
+    Words(String),
+    /// The race code was missing or not right.
+    RaceCode(crate::pilot_access::RaceCodeRefusal),
+}
+
+impl From<String> for Declined {
+    fn from(words: String) -> Self {
+        Self::Words(words)
+    }
+}
+
+fn decide_ask(
+    registry: &EventRegistry,
+    request: &crate::remote::PushRequest,
+) -> Result<(), Declined> {
     use crate::remote::PilotAsk;
     let open = registry.active().map(|event| event.id);
     if open.as_ref() != Some(&request.event) {
-        return Err("That event is not the one open at the race right now.".to_owned());
+        return Err("That event is not the one open at the race right now."
+            .to_owned()
+            .into());
     }
     if !registry.pilots().exists(&request.pilot) {
-        return Err("The race computer does not have that pilot.".to_owned());
+        return Err("The race computer does not have that pilot."
+            .to_owned()
+            .into());
     }
     let pilot = request.pilot.clone();
     let by = SignupBy::Pilot;
@@ -119,11 +155,51 @@ pub fn decide(
             by,
         },
         PilotAsk::Leave { heat } => SignupCommand::Leave { heat, pilot, by },
+        // Check-in (§11.9). Taking a seat gives the pilot the laps flown on it, so it is
+        // only for someone at the race: the event's race code says they are (§13.13).
+        PilotAsk::TakeSeat {
+            race,
+            adapter,
+            seat,
+        } => {
+            registry
+                .pilot_access()
+                .check_race_code(
+                    &request.event,
+                    &pilot,
+                    request.code.as_deref(),
+                    std::time::Instant::now(),
+                )
+                .map_err(Declined::RaceCode)?;
+            return crate::checkin::take(
+                registry,
+                &request.event,
+                pilot,
+                crate::checkin::TakeSeatRequest {
+                    race,
+                    adapter,
+                    seat,
+                },
+            )
+            .map(|_| ())
+            .map_err(|refused| refused.message.into());
+        }
+        // Giving a seat up needs no code: it takes nothing from anyone.
+        PilotAsk::DropSeat { race } => {
+            return crate::checkin::drop_seat(
+                registry,
+                &request.event,
+                &pilot,
+                crate::checkin::DropSeatRequest { race },
+            )
+            .map(|_| ())
+            .map_err(|refused| refused.message.into());
+        }
     };
     with_event(registry, &request.event, |session| {
         session.commands(vec![Command::Signup(command)])
     })
-    .map_err(|refused| refused.message)
+    .map_err(|refused| refused.message.into())
 }
 
 /// `POST /public/pilot/signup/take` — the signed-in pilot takes a seat in a heat.

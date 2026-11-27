@@ -180,7 +180,16 @@ pub fn router(state: AppState) -> Router {
                 // A signed-in pilot asks the Director for a spot (§13.4).
                 .route("/pilot/signup/take", axum::routing::post(asks::post_take))
                 .route("/pilot/signup/next", axum::routing::post(asks::post_next))
-                .route("/pilot/signup/leave", axum::routing::post(asks::post_leave)),
+                .route("/pilot/signup/leave", axum::routing::post(asks::post_leave))
+                // And for an open seat in a race that is under way (§13.13).
+                .route(
+                    "/pilot/checkin/take",
+                    axum::routing::post(asks::post_take_seat),
+                )
+                .route(
+                    "/pilot/checkin/drop",
+                    axum::routing::post(asks::post_drop_seat),
+                ),
         )
         .route("/api/sign-in/providers", get(signin::get_providers))
         .route("/auth/{provider}/start", get(signin::get_start))

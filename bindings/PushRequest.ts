@@ -14,4 +14,9 @@ export type PushRequest = {
 /**
  * Names this one ask, to answer it by.
  */
-id: string, event: EventId, pilot: PilotId, ask: PilotAsk, };
+id: string, event: EventId, pilot: PilotId, ask: PilotAsk, 
+/**
+ * The race code the pilot typed, for an ask that needs one. The server passes it on
+ * as typed and does not know whether it is right: the Director checks it.
+ */
+code?: string, };

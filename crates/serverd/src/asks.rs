@@ -1,5 +1,6 @@
 //! A pilot asking, on the server, for something only the Director can do
-//! (docs/primitives.md §13.4): signing up for a heat (§11.5).
+//! (docs/primitives.md §13.4): signing up for a heat (§11.5), and checking in to an open
+//! seat (§11.9).
 //!
 //! **The Director is the only writer of an event.** So the server changes nothing. It
 //! holds the ask, tells the Director, and gives the pilot the Director's answer:
@@ -12,6 +13,11 @@
 //!    pilot's own, and answers (`POST /push/requests/{id}`).
 //! 4. The pilot's request ends with that answer. What changed comes back with the
 //!    Director's next push, which is how the page sees it.
+//!
+//! **Checking in needs the race code** (§13.13). Taking an open seat gives a pilot the laps
+//! flown on it, so it is only for someone at the race. The director shows a code there,
+//! the pilot types it, and the server passes it on with the ask. The Director checks it:
+//! the server never learns the code and cannot say whether one is right.
 //!
 //! Nothing here is kept. An ask lives only as long as the pilot's request waits. If no
 //! Director is listening, the pilot is told so at once.
@@ -30,7 +36,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream::{self, Stream};
-use gridfpv_events::{PhaseId, PilotId, SignupSeat};
+use gridfpv_events::{AdapterId, PhaseId, PilotId, RaceId, SeatRef, SignupSeat};
 use gridfpv_server::error::ErrorCode;
 use gridfpv_server::events::EventId;
 use gridfpv_server::remote::{PilotAsk, PushAnswer, PushRequest};
@@ -45,6 +51,9 @@ use crate::read::shown;
 
 /// How long a pilot's ask waits for the Director's answer.
 pub const ANSWER_WITHIN: Duration = Duration::from_secs(10);
+
+/// The most characters of a race code that are passed on to the Director.
+const CODE_MAX: usize = 64;
 
 /// How often the stream to a Director says it is still there.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -157,6 +166,7 @@ impl Asks {
         event: EventId,
         pilot: PilotId,
         ask: PilotAsk,
+        code: Option<String>,
         within: Duration,
     ) -> Result<PushAnswer, NoAnswer> {
         let (tx, rx) = oneshot::channel();
@@ -177,6 +187,7 @@ impl Asks {
                     event,
                     pilot,
                     ask,
+                    code,
                 },
                 answer: tx,
             });
@@ -339,15 +350,31 @@ async fn put_before_director(
     club: String,
     event: String,
     ask: PilotAsk,
+    code: Option<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (club, event, pilot) = pilot_of(state, standing, &club, &event)?;
+    // Passed on as typed, within reason. Whether it is right is the Director's to say.
+    let code = code
+        .map(|code| code.trim().chars().take(CODE_MAX).collect::<String>())
+        .filter(|code| !code.is_empty());
     match state
         .asks
-        .ask(&club, event, pilot, ask, ANSWER_WITHIN)
+        .ask(&club, event, pilot, ask, code, ANSWER_WITHIN)
         .await
     {
-        Ok(PushAnswer { refused: None }) => Ok(Json(serde_json::json!({}))),
-        Ok(PushAnswer { refused: Some(why) }) => Err(refused(why)),
+        Ok(PushAnswer { refused: None, .. }) => Ok(Json(serde_json::json!({}))),
+        // About the race code: its own status, so the page knows to ask for the code.
+        Ok(PushAnswer {
+            refused: Some(why),
+            needs_code: true,
+        }) => Err(ApiError::new(
+            StatusCode::PRECONDITION_REQUIRED,
+            ErrorCode::Refused,
+            why,
+        )),
+        Ok(PushAnswer {
+            refused: Some(why), ..
+        }) => Err(refused(why)),
         Err(NoAnswer::NobodyListening) => Err(refused(
             "The race computer is not connected right now. Try again in a moment, or sign up at the race.",
         )),
@@ -370,7 +397,7 @@ pub async fn post_take(
         heat: body.heat,
         seat: body.seat,
     };
-    put_before_director(&state, &standing, club, event, ask).await
+    put_before_director(&state, &standing, club, event, ask, None).await
 }
 
 /// `POST …/public/pilot/signup/next`.
@@ -384,7 +411,7 @@ pub async fn post_next(
         phase: body.phase,
         seat: body.seat,
     };
-    put_before_director(&state, &standing, club, event, ask).await
+    put_before_director(&state, &standing, club, event, ask, None).await
 }
 
 /// `POST …/public/pilot/signup/leave`.
@@ -400,6 +427,57 @@ pub async fn post_leave(
         club,
         event,
         PilotAsk::Leave { heat: body.heat },
+        None,
+    )
+    .await
+}
+
+/// `POST …/public/pilot/checkin/take`: the same body a pilot sends at the race, and the
+/// race code that shows they are there (§13.13).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakeSeatBody {
+    pub race: RaceId,
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// `POST …/public/pilot/checkin/drop`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DropSeatBody {
+    pub race: RaceId,
+}
+
+/// `POST …/public/pilot/checkin/take`.
+pub async fn post_take_seat(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Path((club, event)): EventPath,
+    Json(body): Json<TakeSeatBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ask = PilotAsk::TakeSeat {
+        race: body.race,
+        adapter: body.adapter,
+        seat: body.seat,
+    };
+    put_before_director(&state, &standing, club, event, ask, body.code).await
+}
+
+/// `POST …/public/pilot/checkin/drop`.
+pub async fn post_drop_seat(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Path((club, event)): EventPath,
+    Json(body): Json<DropSeatBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    put_before_director(
+        &state,
+        &standing,
+        club,
+        event,
+        PilotAsk::DropSeat { race: body.race },
+        None,
     )
     .await
 }

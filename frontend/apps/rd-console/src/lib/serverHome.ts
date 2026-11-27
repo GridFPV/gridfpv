@@ -10,6 +10,11 @@ export type ServerPlace =
   | { kind: 'list' }
   /** One event of one club. */
   | { kind: 'event'; club: string; event: string }
+  /**
+   * One event, opened from the race code's QR at the race (§13.13). The page keeps the
+   * code and goes on to the event.
+   */
+  | { kind: 'here'; club: string; event: string; code: string }
   /** Signing in. `problem` is why the last try did not work, as the server said. */
   | { kind: 'sign-in'; problem?: string }
   /** An invite link. */
@@ -26,6 +31,7 @@ export type ServerPlace =
  * list.
  *
  * - `#/e/‹club›/‹event›`: one event
+ * - `#/here/‹club›/‹event›/‹code›`: one event, with the race code shown at the race
  * - `#/sign-in`, `#/sign-in?problem=‹code›`
  * - `#/invite/‹secret›`
  * - `#/account`
@@ -38,6 +44,9 @@ export function parseServerHash(hash: string): ServerPlace {
   try {
     const [first, ...rest] = parts.map((part) => decodeURIComponent(part));
     if (first === 'e' && rest.length === 2) return { kind: 'event', club: rest[0], event: rest[1] };
+    if (first === 'here' && rest.length === 3) {
+      return { kind: 'here', club: rest[0], event: rest[1], code: rest[2] };
+    }
     if (first === 'sign-in' && rest.length === 0) {
       const problem = new URLSearchParams(query).get('problem') ?? undefined;
       return problem ? { kind: 'sign-in', problem } : { kind: 'sign-in' };
@@ -58,6 +67,8 @@ export function formatServerHash(place: ServerPlace): string {
       return '#/';
     case 'event':
       return `#/e/${encodeURIComponent(place.club)}/${encodeURIComponent(place.event)}`;
+    case 'here':
+      return `#/here/${encodeURIComponent(place.club)}/${encodeURIComponent(place.event)}/${encodeURIComponent(place.code)}`;
     case 'sign-in':
       return place.problem ? `#/sign-in?problem=${encodeURIComponent(place.problem)}` : '#/sign-in';
     case 'invite':
