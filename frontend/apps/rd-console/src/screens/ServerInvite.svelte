@@ -77,6 +77,12 @@
       <p class="muted" role="status">Loading…</p>
     {:else}
       <p class="lead" data-testid="invite-for">You are invited to {inviteWords(invite)}</p>
+      {#if invite.pilot}
+        <p data-testid="invite-pilot">
+          This invite is for the pilot <strong>{invite.pilot.callsign}</strong>. Accepting it puts {invite
+            .pilot.callsign}'s race results on your account.
+        </p>
+      {/if}
       {#if error}<Banner tone="danger">{error}</Banner>{/if}
       {#if account}
         <p>You are signed in as <strong>{account.name}</strong>.</p>

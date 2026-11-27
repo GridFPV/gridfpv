@@ -125,6 +125,9 @@ pub struct MyAccount {
     pub owner: bool,
     pub sign_ins: Vec<MySignIn>,
     pub clubs: Vec<MyClub>,
+    /// The pilots this account holds, and those it has asked for.
+    #[serde(default)]
+    pub pilots: Vec<crate::claims::MyPilot>,
 }
 
 /// `GET /api/me`.
@@ -156,6 +159,14 @@ pub enum InviteFor {
     Group,
 }
 
+/// The pilot an invite is made for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct InvitePilot {
+    pub id: String,
+    pub callsign: String,
+}
+
 /// An invite, without its link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
@@ -171,6 +182,10 @@ pub struct InviteView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub role: Option<ClubRole>,
+    /// The club's pilot it is made for. Using it gives that pilot's results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pilot: Option<InvitePilot>,
     pub label: String,
     pub max_uses: u32,
     pub uses: u32,
@@ -195,6 +210,11 @@ pub struct InviteRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub role: Option<ClubRole>,
+    /// For a personal invite: the club's pilot it is for. Whoever uses the invite gets
+    /// that pilot's results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pilot: Option<String>,
     /// For a group invite: how many people may use it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -237,10 +257,13 @@ impl From<AccountError> for ApiError {
         let (status, code) = match &e {
             AccountError::InviteDoesNotWork
             | AccountError::NoSuchAccount
-            | AccountError::NotAMember => (StatusCode::NOT_FOUND, ErrorCode::UnknownScope),
-            AccountError::SignInTaken | AccountError::LastSignIn | AccountError::LastDirector => {
-                (StatusCode::CONFLICT, ErrorCode::Refused)
-            }
+            | AccountError::NotAMember
+            | AccountError::NoSuchPilot
+            | AccountError::NoSuchClaim => (StatusCode::NOT_FOUND, ErrorCode::UnknownScope),
+            AccountError::SignInTaken
+            | AccountError::LastSignIn
+            | AccountError::LastDirector
+            | AccountError::PilotTaken => (StatusCode::CONFLICT, ErrorCode::Refused),
             AccountError::Invalid(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             AccountError::Storage(why) => {
                 eprintln!("gridfpv-server: accounts failed: {why}");
@@ -263,7 +286,7 @@ fn not_signed_in() -> ApiError {
     )
 }
 
-fn not_allowed() -> ApiError {
+pub(crate) fn not_allowed() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
         ErrorCode::Forbidden,
@@ -401,7 +424,7 @@ pub async fn same_site(State(state): State<AppState>, request: Request, next: Ne
 
 // ── Building the shapes ─────────────────────────────────────────────────────
 
-fn club_of(state: &AppState, id: &ClubId) -> Option<PushClub> {
+pub(crate) fn club_of(state: &AppState, id: &ClubId) -> Option<PushClub> {
     state.book.club(id).map(|club| PushClub {
         id: club.id.0,
         name: club.name,
@@ -418,6 +441,22 @@ fn invite_view(state: &AppState, invite: &Invite, now: i64) -> InviteView {
         },
         club: invite.kind.club().and_then(|club| club_of(state, club)),
         role: invite.kind.role().map(ClubRole::from),
+        pilot: match &invite.kind {
+            InviteKind::Personal {
+                club,
+                pilot: Some(pilot),
+                ..
+            } => state
+                .accounts
+                .club_pilot(club, pilot)
+                .ok()
+                .flatten()
+                .map(|found| InvitePilot {
+                    id: found.pilot,
+                    callsign: found.callsign,
+                }),
+            _ => None,
+        },
         label: invite.label.clone(),
         max_uses: invite.max_uses,
         uses: invite.uses,
@@ -456,11 +495,12 @@ fn my_account(state: &AppState, standing: &Standing) -> Result<Option<MyAccount>
                 })
             })
             .collect(),
+        pilots: crate::claims::my_pilots(state, &standing.account)?,
     }))
 }
 
 /// The club in the address, and the right to do `act` in it.
-fn in_club(
+pub(crate) fn in_club(
     state: &AppState,
     club: String,
     act: impl FnOnce(&ClubId) -> bool,
@@ -601,13 +641,16 @@ pub async fn post_club_invite(
             kind: InviteKind::Personal {
                 club,
                 role,
-                pilot: None,
+                pilot: request.pilot.filter(|pilot| !pilot.is_empty()),
             },
             label: request.label,
             max_uses: 1,
             expires_at: None,
         },
         InviteFor::Group => {
+            if request.pilot.is_some() {
+                return Err(bad("A group invite is not for one pilot."));
+            }
             if request.role.is_some_and(|role| role != ClubRole::Pilot) {
                 return Err(bad("A group invite always joins as a pilot."));
             }

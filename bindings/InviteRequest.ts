@@ -15,6 +15,11 @@ kind: InviteFor, label: string,
  */
 role?: ClubRole, 
 /**
+ * For a personal invite: the club's pilot it is for. Whoever uses the invite gets
+ * that pilot's results.
+ */
+pilot?: string, 
+/**
  * For a group invite: how many people may use it.
  */
 max_uses?: number, 

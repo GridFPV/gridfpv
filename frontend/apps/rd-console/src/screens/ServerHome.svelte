@@ -19,11 +19,12 @@
     parseServerHash,
     type ServerPlace
   } from '../lib/serverHome.js';
-  import { peopleApi, signInProblem, type PeopleApi } from '../lib/serverPeople.js';
+  import { peopleApi, sayIn, signInProblem, type PeopleApi } from '../lib/serverPeople.js';
   import { publicSource } from '../lib/spectator.js';
   import ServerAccount from './ServerAccount.svelte';
   import ServerClub from './ServerClub.svelte';
   import ServerInvite from './ServerInvite.svelte';
+  import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
   import SpectatorView from './SpectatorView.svelte';
 
@@ -81,7 +82,12 @@
   // A page about the account reads it again on the way in: a role may have been given or
   // taken since the page was opened, and what it shows must be what is so.
   $effect(() => {
-    if (place.kind === 'account' || place.kind === 'club' || place.kind === 'invite') {
+    if (
+      place.kind === 'account' ||
+      place.kind === 'club' ||
+      place.kind === 'invite' ||
+      place.kind === 'results'
+    ) {
       void readMe();
     }
   });
@@ -211,6 +217,7 @@
         {providers}
         clubs={clubs?.map((entry) => entry.club) ?? []}
         onchange={(me) => (account = me.account ?? null)}
+        onreread={readMe}
         onsignedout={() => {
           account = null;
           go({ kind: 'list' });
@@ -224,13 +231,24 @@
     {@const wanted = place.club}
     {@const found = clubs?.find((entry) => entry.club.id === wanted)?.club}
     <p class="back"><a href={formatServerHash({ kind: 'account' })}>← Your account</a></p>
-    {#if account && found}
-      <ServerClub api={people} club={found} me={account.id} />
+    {@const say = sayIn(account ?? undefined, wanted)}
+    {#if account && found && say}
+      <ServerClub api={people} club={found} me={account.id} runs={say === 'runs'} />
+    {:else if account && found}
+      <Card elevation="sm"><p>Only those who look after this club can open this page.</p></Card>
     {:else if account === null}
       <p class="event">Sign in</p>
       <ServerSignIn api={people} {providers} />
     {:else if account && clubs !== undefined}
       <Card elevation="sm"><p class="event">This club is not here</p></Card>
+    {/if}
+  {:else if place.kind === 'results'}
+    <p class="back"><a href={formatServerHash({ kind: 'account' })}>← Your account</a></p>
+    {#if account}
+      <ServerResults api={people} />
+    {:else if account === null}
+      <p class="event">Sign in</p>
+      <ServerSignIn api={people} {providers} />
     {/if}
   {:else if picked}
     <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>

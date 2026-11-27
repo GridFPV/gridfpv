@@ -16,8 +16,10 @@ export type ServerPlace =
   | { kind: 'invite'; secret: string }
   /** The signed-in account. */
   | { kind: 'account' }
-  /** A club's members and invites, for its directors. */
-  | { kind: 'club'; club: string };
+  /** A club's members, invites and pilots, for those who look after it. */
+  | { kind: 'club'; club: string }
+  /** The events the signed-in account's pilots flew. */
+  | { kind: 'results' };
 
 /**
  * Read the part of the address after the `#`. Anything that is not one of the pages is the
@@ -28,6 +30,7 @@ export type ServerPlace =
  * - `#/invite/‹secret›`
  * - `#/account`
  * - `#/club/‹club›`
+ * - `#/results`
  */
 export function parseServerHash(hash: string): ServerPlace {
   const [path, query = ''] = hash.replace(/^#\/?/, '').split('?');
@@ -42,6 +45,7 @@ export function parseServerHash(hash: string): ServerPlace {
     if (first === 'invite' && rest.length === 1) return { kind: 'invite', secret: rest[0] };
     if (first === 'account' && rest.length === 0) return { kind: 'account' };
     if (first === 'club' && rest.length === 1) return { kind: 'club', club: rest[0] };
+    if (first === 'results' && rest.length === 0) return { kind: 'results' };
   } catch {
     // A badly written address is the list.
   }
@@ -62,6 +66,8 @@ export function formatServerHash(place: ServerPlace): string {
       return '#/account';
     case 'club':
       return `#/club/${encodeURIComponent(place.club)}`;
+    case 'results':
+      return '#/results';
   }
 }
 

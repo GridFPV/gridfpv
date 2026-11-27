@@ -125,6 +125,42 @@ pub struct ServerEvent {
     pub created_at: i64,
 }
 
+/// An account on a server, as a Director needs to know it: enough to show who it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PushAccount {
+    pub id: String,
+    /// What the person is called on the server.
+    pub name: String,
+}
+
+/// A pilot of a club, between a Director and a server (`/push/pilots`).
+///
+/// A Director sends the pilots it has, so the server knows them before any event names
+/// them. A server sends the pilots the club has, each with the account that holds it, so
+/// a Director can bring them in already tied to their accounts (§13.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PushPilot {
+    pub id: gridfpv_events::PilotId,
+    pub callsign: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub color: Option<String>,
+    /// The account that holds this pilot on the server. A server says; a Director does
+    /// not, and what it sends here is not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account: Option<PushAccount>,
+}
+
+/// Which account holds a pilot (`PUT /push/pilots/{pilot}/account`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PushPilotAccount {
+    pub account: String,
+}
+
 /// Why a server did not take a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]

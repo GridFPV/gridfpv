@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::accounts::Accounts;
 use crate::book::{Book, BookError};
+use crate::claims;
 use crate::page::Page;
 use crate::people;
 use crate::push;
@@ -177,6 +178,29 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/clubs/{club}/members/{account}",
             axum::routing::put(people::put_member).delete(people::delete_member),
+        )
+        .route("/api/clubs/{club}/pilots", get(claims::get_pilots))
+        .route(
+            "/api/clubs/{club}/pilots/{pilot}/claim",
+            axum::routing::post(claims::post_claim).delete(claims::delete_claim),
+        )
+        .route(
+            "/api/clubs/{club}/pilots/{pilot}/holder",
+            axum::routing::put(claims::put_holder).delete(claims::delete_holder),
+        )
+        .route(
+            "/api/clubs/{club}/pilots/{pilot}/asks/{account}",
+            axum::routing::delete(claims::delete_ask),
+        )
+        .route("/api/me/results", get(claims::get_my_results))
+        .route(
+            "/push/pilots",
+            get(claims::get_push_pilots).put(claims::put_push_pilots),
+        )
+        .route("/push/members", get(claims::get_push_members))
+        .route(
+            "/push/pilots/{pilot}/account",
+            axum::routing::put(claims::put_push_account).delete(claims::delete_push_account),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

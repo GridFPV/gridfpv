@@ -267,7 +267,7 @@ link works once, and for one day.
 ### 5. Invite your club
 
 Open the server's page, sign in, and open your account from the top corner. An owner sees
-**Members and invites** for each club. From there:
+**Members, invites and pilots** for each club. From there:
 
 - **One person:** make an invite for someone, pick what they join as, and send them the
   link. It works once. Make your club's directors this way.
@@ -279,6 +279,24 @@ another.
 
 Directors can invite to their own club and change the roles of its members. They cannot
 touch another club. A club always keeps at least one director.
+
+### 6. Tie pilots to accounts
+
+A club's pilots show on its page once a director has sent an event, or their pilot list.
+The account that **holds** a pilot gets the results flown under that pilot's callsign.
+There are three ways an account comes to hold one:
+
+- **An invite made for the pilot.** When you invite one person, pick **Their pilot**.
+  Whoever uses the link gets that pilot's results in the same step.
+- **A director gives it.** On the club's page, under **Pilots**, pick a member beside the
+  pilot.
+- **The person asks.** On their account page they press **Find yourself in** the club and
+  pick their callsign. Nothing is theirs yet. A director, or a member with the
+  **Approver** role, answers **Yes** or **No** on the club's page.
+
+Knowing a callsign is never enough: someone the club trusts always says yes.
+
+An approver cannot answer their own ask. A director can take a pilot back at any time.
 
 ## What is kept
 
@@ -306,7 +324,8 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
 
 ## What it does not do yet
 
-- An account does not do much yet: results are not tied to accounts, and a director still
-  sends events with a link token. Anyone can look.
+- A signed-in pilot sees the events they flew and where they placed. Seasons and records
+  come later.
+- A director still sends events with a link token. Anyone can look at an event.
 - There is one club on a server.
 - Videos are not stored.

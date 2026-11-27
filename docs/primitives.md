@@ -1826,10 +1826,11 @@ signed-in people only, video.
 - Which long-term records come first: results per pilot, seasons (#129), records per
   track (#61).
 
-### 13.12 What is built (step 1, 2026-11-27)
+### 13.12 What is built (2026-11-27)
 
 Step 1 of §13.10 is built on the `server` branch: a server, a push, and the server's own
-page. Steps 2 and 3 are not started.
+page. Step 2 is built too: accounts, and results that reach them (see **Claims**
+below). Step 3 is not started.
 
 - **The program** is `gridfpv-server` (crate `gridfpv-serverd`). It keeps the clubs and
   link tokens in one file and each event in its own file, the same kind a Director keeps.
@@ -1850,6 +1851,22 @@ entry). The server takes a batch only when it continues the copy it holds. So:
 **The clock.** Every time in a log is on the Director's clock. A push says what that clock
 reads, and the server gives a page that time, so a countdown on a remote page is right
 even when the two clocks differ.
+
+**Claims: how results reach an account** (§13.7; Ryan agreed the three points on
+2026-11-27).
+
+- **A club's pilot** is a pilot a Director of the club sent: the id the Director gave them
+  and their callsign. The server learns them from every event's header and from the
+  Director's pilot list. It never forgets one.
+- **One account holds a pilot, at most.** That account gets the results flown under the
+  pilot's id, in that club. An account can hold several pilots, in several clubs.
+- **Three ways to come to hold one:** a director gives it; a personal invite was made for
+  that pilot; or the person asks and a director or claims approver of the club says yes.
+  An approver cannot say yes to their own ask.
+- **Only a member of the club holds or asks for its pilots.** Leaving the club lets go of
+  them.
+- **"My results"** is the first thing an account sees of them: the events its pilots flew,
+  and their place in each class.
 
 **Choices made while building.** Ryan agreed to 1 and 2, changed 3, and said 4 and 7 are
 fine for now (2026-11-27). 5 and 6 are not confirmed.

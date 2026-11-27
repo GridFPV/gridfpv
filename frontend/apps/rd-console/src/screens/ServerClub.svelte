@@ -1,7 +1,10 @@
 <script lang="ts">
   /**
-   * ServerClub — a club's members and invites, for its directors
-   * (docs/primitives.md §13.2, §13.8).
+   * ServerClub — a club's members, invites and pilots, for those who look after it
+   * (docs/primitives.md §13.2, §13.7, §13.8).
+   *
+   * Someone who runs the club (a director, or a server owner) sees all three. A claims
+   * approver sees only the pilots, to answer the members who asked for one.
    *
    * Only a club's directors hand out its roles and invite to it. A club always keeps at
    * least one director: the server refuses the change that would leave it with none, and
@@ -11,7 +14,14 @@
    * is for and how it stands.
    */
   import { Banner, Button, Card, Dialog, Input, toast } from '@gridfpv/components';
-  import type { ClubRole, InviteFor, InviteMade, InviteView, MemberView } from '@gridfpv/types';
+  import type {
+    ClubPilotView,
+    ClubRole,
+    InviteFor,
+    InviteMade,
+    InviteView,
+    MemberView
+  } from '@gridfpv/types';
   import {
     ROLES,
     inviteLink,
@@ -19,20 +29,33 @@
     roleWord,
     type PeopleApi
   } from '../lib/serverPeople.js';
+  import ServerClubPilots from './ServerClubPilots.svelte';
 
   let {
     api,
     club,
     me,
+    runs = true,
     origin = location.origin
   }: {
     api: Pick<
       PeopleApi,
-      'members' | 'setRole' | 'removeMember' | 'clubInvites' | 'makeInvite' | 'revokeInvite'
+      | 'members'
+      | 'setRole'
+      | 'removeMember'
+      | 'clubInvites'
+      | 'makeInvite'
+      | 'revokeInvite'
+      | 'clubPilots'
+      | 'giveTo'
+      | 'freePilot'
+      | 'refuseAsk'
     >;
     club: { id: string; name: string };
     /** The signed-in account's id, to mark its own row. */
     me: string;
+    /** Whether the person runs the club. A claims approver does not: they see only pilots. */
+    runs?: boolean;
     /** This server's address, for the link shown. A test passes its own. */
     origin?: string;
   } = $props();
@@ -49,16 +72,27 @@
 
   const say = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+  /** The club's pilots nobody holds, for an invite made for one of them. */
+  let freePilots = $state<ClubPilotView[]>([]);
+
   async function load() {
+    // Only someone who runs the club may read its members and invites.
+    if (!runs) return;
     try {
       [members, invites] = await Promise.all([api.members(club.id), api.clubInvites(club.id)]);
       loadError = undefined;
+      // The invite form offers these. Without them an invite is still made, for no pilot.
+      freePilots = await api
+        .clubPilots(club.id)
+        .then((all) => all.filter((pilot) => !pilot.taken))
+        .catch(() => []);
     } catch (err) {
       loadError = say(err);
     }
   }
   $effect(() => {
     void club.id;
+    void runs;
     members = undefined;
     invites = undefined;
     made = undefined;
@@ -103,6 +137,8 @@
   let kind = $state<InviteFor>('Personal');
   let label = $state('');
   let role = $state<ClubRole>('Pilot');
+  /** The club's pilot a personal invite is for. Empty for none. */
+  let pilot = $state('');
   let uses = $state(20);
   let days = $state(7);
   const canMake = $derived(
@@ -115,7 +151,7 @@
     if (!canMake) return;
     const request =
       kind === 'Personal'
-        ? { kind, label: label.trim(), role }
+        ? { kind, label: label.trim(), role, ...(pilot !== '' ? { pilot } : {}) }
         : { kind, label: label.trim(), max_uses: uses, days };
     let result: InviteMade | undefined;
     if (
@@ -125,6 +161,7 @@
     ) {
       made = result;
       label = '';
+      pilot = '';
     }
   }
 
@@ -147,140 +184,163 @@
   {/if}
   {#if error}<Banner tone="danger"><span data-testid="club-error">{error}</span></Banner>{/if}
 
-  <Card elevation="sm">
-    <div class="block">
-      <h2>Members</h2>
-      {#if members === undefined}
-        {#if !loadError}<p class="muted" role="status">Loading…</p>{/if}
-      {:else}
-        <ul aria-label="Members">
-          {#each members as member (member.id)}
-            <li data-testid="club-member">
-              <span class="who"
-                >{member.name}{#if member.id === me}<span class="muted"> (you)</span>{/if}</span
-              >
-              <select
-                aria-label="Role of {member.name}"
-                value={member.role}
-                disabled={busy}
-                onchange={(e) => changeRole(member, e.currentTarget)}
-              >
-                {#each ROLES as option (option)}
-                  <option value={option}>{roleWord(option)}</option>
-                {/each}
-              </select>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                aria-label="Remove {member.name}"
-                onclick={() => (removing = member)}>Remove</Button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
-  </Card>
-
-  <Card elevation="sm">
-    <div class="block">
-      <h2>Invite someone</h2>
-      <form onsubmit={make} aria-label="New invite">
-        <div class="kinds" role="radiogroup" aria-label="Who the invite is for">
-          <label><input type="radio" bind:group={kind} value="Personal" /> One person</label>
-          <label><input type="radio" bind:group={kind} value="Group" /> Anyone with the link</label>
-        </div>
-        <div class="fields">
-          <label for="invite-label"
-            >{kind === 'Personal' ? 'Who it is for' : 'Where you will post it'}</label
-          >
-          <Input
-            id="invite-label"
-            maxlength={80}
-            placeholder={kind === 'Personal' ? 'Their callsign' : 'Club Discord'}
-            bind:value={label}
-            disabled={busy}
-          />
-          {#if kind === 'Personal'}
-            <label for="invite-role">Joins as</label>
-            <select id="invite-role" bind:value={role} disabled={busy}>
-              {#each ROLES as option (option)}
-                <option value={option}>{roleWord(option)}</option>
-              {/each}
-            </select>
-          {:else}
-            <label for="invite-uses">How many people</label>
-            <Input
-              id="invite-uses"
-              type="number"
-              min={1}
-              max={500}
-              bind:value={uses}
-              disabled={busy}
-            />
-            <label for="invite-days">Days it lasts</label>
-            <Input
-              id="invite-days"
-              type="number"
-              min={1}
-              max={90}
-              bind:value={days}
-              disabled={busy}
-            />
-          {/if}
-        </div>
-        <div>
-          <Button variant="primary" size="sm" type="submit" disabled={busy || !canMake}
-            >Make the invite</Button
-          >
-        </div>
-      </form>
-
-      {#if made}
-        {@const link = inviteLink(origin, made.secret)}
-        <div class="made" data-testid="invite-made">
-          <p>
-            {#if made.invite.kind === 'Group'}
-              Post this link in <strong>{made.invite.label}</strong>. It is shown this once.
-            {:else}
-              Send this link to <strong>{made.invite.label}</strong>. It is shown this once.
-            {/if}
-          </p>
-          <code data-testid="invite-link">{link}</code>
-          <div class="row">
-            <Button size="sm" onclick={() => copy(link)}>Copy</Button>
-            <Button size="sm" variant="ghost" onclick={() => (made = undefined)}>Done</Button>
-          </div>
-        </div>
-      {/if}
-
-      {#if invites && invites.length > 0}
-        <ul aria-label="Invites">
-          {#each invites as invite (invite.id)}
-            <li data-testid="club-invite" class:spent={!invite.works}>
-              <span class="who">{invite.label}</span>
-              <span class="muted"
-                >{invite.kind === 'Group'
-                  ? 'Anyone with the link'
-                  : roleWord(invite.role ?? 'Pilot')}</span
-              >
-              <span class="muted">{inviteStanding(invite, now)}</span>
-              {#if invite.works}
+  {#if !runs}
+    <ServerClubPilots {api} {club} {me} runs={false} />
+  {:else}
+    <Card elevation="sm">
+      <div class="block">
+        <h2>Members</h2>
+        {#if members === undefined}
+          {#if !loadError}<p class="muted" role="status">Loading…</p>{/if}
+        {:else}
+          <ul aria-label="Members">
+            {#each members as member (member.id)}
+              <li data-testid="club-member">
+                <span class="who"
+                  >{member.name}{#if member.id === me}<span class="muted"> (you)</span>{/if}</span
+                >
+                <select
+                  aria-label="Role of {member.name}"
+                  value={member.role}
+                  disabled={busy}
+                  onchange={(e) => changeRole(member, e.currentTarget)}
+                >
+                  {#each ROLES as option (option)}
+                    <option value={option}>{roleWord(option)}</option>
+                  {/each}
+                </select>
                 <Button
                   size="sm"
                   variant="ghost"
                   disabled={busy}
-                  aria-label="Take back the invite for {invite.label}"
-                  onclick={() => run(() => api.revokeInvite(club.id, invite.id))}>Take back</Button
+                  aria-label="Remove {member.name}"
+                  onclick={() => (removing = member)}>Remove</Button
                 >
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    </Card>
+
+    <Card elevation="sm">
+      <div class="block">
+        <h2>Invite someone</h2>
+        <form onsubmit={make} aria-label="New invite">
+          <div class="kinds" role="radiogroup" aria-label="Who the invite is for">
+            <label><input type="radio" bind:group={kind} value="Personal" /> One person</label>
+            <label
+              ><input type="radio" bind:group={kind} value="Group" /> Anyone with the link</label
+            >
+          </div>
+          <div class="fields">
+            <label for="invite-label"
+              >{kind === 'Personal' ? 'Who it is for' : 'Where you will post it'}</label
+            >
+            <Input
+              id="invite-label"
+              maxlength={80}
+              placeholder={kind === 'Personal' ? 'Their callsign' : 'Club Discord'}
+              bind:value={label}
+              disabled={busy}
+            />
+            {#if kind === 'Personal'}
+              <label for="invite-role">Joins as</label>
+              <select id="invite-role" bind:value={role} disabled={busy}>
+                {#each ROLES as option (option)}
+                  <option value={option}>{roleWord(option)}</option>
+                {/each}
+              </select>
+              {#if freePilots.length > 0}
+                <label for="invite-pilot">Their pilot</label>
+                <select id="invite-pilot" bind:value={pilot} disabled={busy}>
+                  <option value="">Not one of these</option>
+                  {#each freePilots as option (option.id)}
+                    <option value={option.id}>{option.callsign}</option>
+                  {/each}
+                </select>
               {/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
-  </Card>
+            {:else}
+              <label for="invite-uses">How many people</label>
+              <Input
+                id="invite-uses"
+                type="number"
+                min={1}
+                max={500}
+                bind:value={uses}
+                disabled={busy}
+              />
+              <label for="invite-days">Days it lasts</label>
+              <Input
+                id="invite-days"
+                type="number"
+                min={1}
+                max={90}
+                bind:value={days}
+                disabled={busy}
+              />
+            {/if}
+          </div>
+          <div>
+            <Button variant="primary" size="sm" type="submit" disabled={busy || !canMake}
+              >Make the invite</Button
+            >
+          </div>
+        </form>
+
+        {#if made}
+          {@const link = inviteLink(origin, made.secret)}
+          <div class="made" data-testid="invite-made">
+            <p>
+              {#if made.invite.kind === 'Group'}
+                Post this link in <strong>{made.invite.label}</strong>. It is shown this once.
+              {:else}
+                Send this link to <strong>{made.invite.label}</strong>. It is shown this once.
+              {/if}
+              {#if made.invite.pilot}
+                Whoever uses it gets <strong>{made.invite.pilot.callsign}</strong>'s results.
+              {/if}
+            </p>
+            <code data-testid="invite-link">{link}</code>
+            <div class="row">
+              <Button size="sm" onclick={() => copy(link)}>Copy</Button>
+              <Button size="sm" variant="ghost" onclick={() => (made = undefined)}>Done</Button>
+            </div>
+          </div>
+        {/if}
+
+        {#if invites && invites.length > 0}
+          <ul aria-label="Invites">
+            {#each invites as invite (invite.id)}
+              <li data-testid="club-invite" class:spent={!invite.works}>
+                <span class="who">{invite.label}</span>
+                <span class="muted"
+                  >{invite.kind === 'Group'
+                    ? 'Anyone with the link'
+                    : roleWord(invite.role ?? 'Pilot')}{invite.pilot
+                    ? `, as ${invite.pilot.callsign}`
+                    : ''}</span
+                >
+                <span class="muted">{inviteStanding(invite, now)}</span>
+                {#if invite.works}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label="Take back the invite for {invite.label}"
+                    onclick={() => run(() => api.revokeInvite(club.id, invite.id))}
+                    >Take back</Button
+                  >
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    </Card>
+
+    <ServerClubPilots {api} {club} {me} runs {members} onchange={load} />
+  {/if}
 </div>
 
 {#if removing}

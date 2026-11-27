@@ -6,7 +6,10 @@ import {
   inviteLink,
   inviteStanding,
   inviteWords,
-  managedClubs,
+  lookedAfterClubs,
+  pilotStanding,
+  placeWords,
+  sayIn,
   providerName,
   roleWord,
   signInProblem
@@ -134,7 +137,7 @@ describe('an invite in words', () => {
   });
 });
 
-describe('managedClubs', () => {
+describe('lookedAfterClubs', () => {
   const all = [
     { id: 'north', name: 'North' },
     { id: 'south', name: 'South' },
@@ -146,12 +149,13 @@ describe('managedClubs', () => {
     owner: false,
     sign_ins: [],
     clubs: [],
+    pilots: [],
     ...over
   });
 
-  it('is where the account is a director, and every club for an owner', () => {
-    expect(managedClubs(undefined, all)).toEqual([]);
-    expect(managedClubs(account({}), all)).toEqual([]);
+  it('is where the account is a director or an approver, and every club for an owner', () => {
+    expect(lookedAfterClubs(undefined, all)).toEqual([]);
+    expect(lookedAfterClubs(account({}), all)).toEqual([]);
     const mixed = account({
       clubs: [
         { club: all[0], role: 'Director' },
@@ -159,8 +163,38 @@ describe('managedClubs', () => {
         { club: all[2], role: 'Approver' }
       ]
     });
-    expect(managedClubs(mixed, all)).toEqual([all[0]]);
-    expect(managedClubs(account({ owner: true }), all)).toEqual(all);
+    // A director runs the club. An approver only answers claims there. A pilot does neither.
+    expect(lookedAfterClubs(mixed, all)).toEqual([
+      { club: all[0], runs: true },
+      { club: all[2], runs: false }
+    ]);
+    expect(lookedAfterClubs(account({ owner: true }), all)).toEqual(
+      all.map((club) => ({ club, runs: true }))
+    );
+    expect(sayIn(mixed, 'north')).toBe('runs');
+    expect(sayIn(mixed, 'south')).toBeUndefined();
+    expect(sayIn(mixed, 'east')).toBe('answers');
+    expect(sayIn(mixed, 'nowhere')).toBeUndefined();
+    expect(sayIn(undefined, 'north')).toBeUndefined();
+    // An owner runs every club, the ones they are not in too.
+    expect(sayIn(account({ owner: true }), 'nowhere')).toBe('runs');
+  });
+});
+
+describe('pilots and results in words', () => {
+  it('says where a pilot stands, and never gives a place racing has not decided', () => {
+    expect(placeWords({ position: 1, of: 12, placed: true })).toBe('1st of 12');
+    expect(placeWords({ position: 2, of: 2, placed: true })).toBe('2nd of 2');
+    expect(placeWords({ position: 11, of: 30, placed: true })).toBe('11th of 30');
+    // Before racing places anyone, the position is only the order of the list.
+    expect(placeWords({ position: 1, of: 12, placed: false })).toBe('Not placed yet');
+  });
+
+  it('says how a pilot stands for the one looking', () => {
+    expect(pilotStanding({ mine: true, asked: false, taken: true })).toBe('Yours');
+    expect(pilotStanding({ mine: false, asked: true, taken: false })).toBe('You asked');
+    expect(pilotStanding({ mine: false, asked: false, taken: true })).toBe('Taken');
+    expect(pilotStanding({ mine: false, asked: false, taken: false })).toBe('');
   });
 });
 
