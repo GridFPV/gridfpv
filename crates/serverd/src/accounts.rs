@@ -58,6 +58,12 @@ pub struct PendingSignIn {
 /// What an invite link's secret starts with.
 pub const INVITE_PREFIX: &str = "gfi_";
 
+/// What a re-connect link's secret starts with, so it is told from an invite's.
+pub const RECONNECT_PREFIX: &str = "gfr_";
+
+/// How long a re-connect link works, in milliseconds: seven days.
+pub const RECONNECT_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 /// The longest a name or label may be.
 const NAME_MAX: usize = 80;
 
@@ -297,6 +303,20 @@ impl ClaimHow {
     }
 }
 
+/// A re-connect link, as it is kept: a link an owner makes for someone who can no longer
+/// sign in (§13.8). Whoever opens it and signs in gets that sign-in put on the account.
+/// The link's secret is not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reconnect {
+    /// A short id to name it by. Not a secret.
+    pub id: String,
+    pub account: AccountId,
+    pub created_by: Option<AccountId>,
+    pub created_at: i64,
+    /// When it stops working, in milliseconds since 1970.
+    pub expires_at: i64,
+}
+
 /// An account's tie to a pilot of a club: it holds the pilot, or has asked to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
@@ -317,6 +337,10 @@ pub enum AccountError {
     NoSuchClaim,
     #[error("That invite does not work. It may have been used, taken back, or have run out.")]
     InviteDoesNotWork,
+    #[error(
+        "That re-connect link does not work. It may have been used, taken back, or have run out."
+    )]
+    ReconnectDoesNotWork,
     #[error("That sign-in already belongs to an account.")]
     SignInTaken,
     #[error("An account must keep at least one way to sign in.")]
@@ -437,6 +461,16 @@ impl Accounts {
                 expires_at INTEGER,
                 created_by TEXT,
                 created_at INTEGER NOT NULL,
+                revoked_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS reconnects (
+                id         TEXT PRIMARY KEY,
+                hash       TEXT NOT NULL UNIQUE,
+                account    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                created_by TEXT,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used_at    INTEGER,
                 revoked_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS club_pilots (
@@ -818,6 +852,213 @@ impl Accounts {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    // ── Getting back in ─────────────────────────────────────────────────────
+
+    /// Every account, by name. For the command line, where an owner picks one to help.
+    pub fn all_accounts(&self) -> Result<Vec<Account>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, created_at FROM accounts ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Account {
+                id: AccountId(row.get(0)?),
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Take a sign-in off someone else's account, as an owner does for a person who lost
+    /// it or had it stolen (§13.8). Unlike [`Self::remove_sign_in`], the last one may go:
+    /// the owner then sends a re-connect link. The account is signed out everywhere, so
+    /// whoever held the sign-in is out at once. `false` when the account has no such
+    /// sign-in.
+    pub fn drop_sign_in(&self, account: &AccountId, provider: &str, subject: &str) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if Self::account_in(&tx, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        let gone = tx.execute(
+            "DELETE FROM sign_ins WHERE account = ?1 AND provider = ?2 AND subject = ?3",
+            params![account.0, provider, subject],
+        )? > 0;
+        if gone {
+            tx.execute(
+                "DELETE FROM sessions WHERE account = ?1",
+                params![account.0],
+            )?;
+        }
+        tx.commit()?;
+        Ok(gone)
+    }
+
+    fn reconnect_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reconnect> {
+        Ok(Reconnect {
+            id: row.get(0)?,
+            account: AccountId(row.get(1)?),
+            created_by: row.get::<_, Option<String>>(2)?.map(AccountId),
+            created_at: row.get(3)?,
+            expires_at: row.get(4)?,
+        })
+    }
+
+    const RECONNECT_COLUMNS: &'static str = "id, account, created_by, created_at, expires_at";
+    /// What makes a kept link one that still works at `?now`.
+    const RECONNECT_STANDS: &'static str =
+        "used_at IS NULL AND revoked_at IS NULL AND expires_at >";
+
+    /// Make a re-connect link for an account. Returns its record and **the link's secret,
+    /// which is not kept**. An account has one such link at a time: making one takes back
+    /// any before it.
+    ///
+    /// Whether the maker may is the caller's to check ([`Standing::may`]).
+    pub fn new_reconnect(
+        &self,
+        account: &AccountId,
+        by: Option<&AccountId>,
+        now: i64,
+    ) -> Result<(Reconnect, String)> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if Self::account_in(&tx, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        tx.execute(
+            "UPDATE reconnects SET revoked_at = ?2
+             WHERE account = ?1 AND used_at IS NULL AND revoked_at IS NULL",
+            params![account.0, now],
+        )?;
+        // Old links are of no use to anyone once they have long run out.
+        tx.execute(
+            "DELETE FROM reconnects WHERE expires_at <= ?1",
+            params![now - RECONNECT_MS],
+        )?;
+        let id = loop {
+            let id = random(6);
+            let taken = tx
+                .query_row(
+                    "SELECT 1 FROM reconnects WHERE id = ?1",
+                    params![id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !taken {
+                break id;
+            }
+        };
+        let secret = format!("{RECONNECT_PREFIX}{}", random(24));
+        let link = Reconnect {
+            id,
+            account: account.clone(),
+            created_by: by.cloned(),
+            created_at: now,
+            expires_at: now + RECONNECT_MS,
+        };
+        tx.execute(
+            "INSERT INTO reconnects (id, hash, account, created_by, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                link.id,
+                hash(&secret),
+                link.account.0,
+                link.created_by.as_ref().map(|a| a.0.clone()),
+                link.created_at,
+                link.expires_at
+            ],
+        )?;
+        tx.commit()?;
+        Ok((link, secret))
+    }
+
+    fn reconnect_by_secret(conn: &Connection, secret: &str, now: i64) -> Result<Option<Reconnect>> {
+        if !secret.starts_with(RECONNECT_PREFIX) {
+            return Ok(None);
+        }
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM reconnects WHERE hash = ?1 AND {} ?2",
+                    Self::RECONNECT_COLUMNS,
+                    Self::RECONNECT_STANDS
+                ),
+                params![hash(secret), now],
+                Self::reconnect_from,
+            )
+            .optional()?)
+    }
+
+    /// The account a re-connect link is for, when the link still works. Looking does not
+    /// use it.
+    pub fn peek_reconnect(&self, secret: &str, now: i64) -> Result<Option<(Reconnect, Account)>> {
+        let conn = self.lock();
+        let Some(link) = Self::reconnect_by_secret(&conn, secret, now)? else {
+            return Ok(None);
+        };
+        Ok(Self::account_in(&conn, &link.account)?.map(|account| (link, account)))
+    }
+
+    /// The re-connect link an account has waiting, if it has one that still works.
+    pub fn reconnect_of(&self, account: &AccountId, now: i64) -> Result<Option<Reconnect>> {
+        Ok(self
+            .lock()
+            .query_row(
+                &format!(
+                    "SELECT {} FROM reconnects WHERE account = ?1 AND {} ?2",
+                    Self::RECONNECT_COLUMNS,
+                    Self::RECONNECT_STANDS
+                ),
+                params![account.0, now],
+                Self::reconnect_from,
+            )
+            .optional()?)
+    }
+
+    /// Take back an account's re-connect link. `false` when it has none that still works.
+    pub fn revoke_reconnect(&self, account: &AccountId, now: i64) -> Result<bool> {
+        Ok(self.lock().execute(
+            &format!(
+                "UPDATE reconnects SET revoked_at = ?2 WHERE account = ?1 AND {} ?2",
+                Self::RECONNECT_STANDS
+            ),
+            params![account.0, now],
+        )? > 0)
+    }
+
+    /// Use a re-connect link. The person has just signed in with `sign_in`: it is put on
+    /// the link's account, and a session is started. Returns the account and the session's
+    /// secret.
+    ///
+    /// The link works once. A sign-in another account holds is refused and the link is
+    /// left to use: the person picked the wrong one. All of it happens or none of it.
+    pub fn reconnect(
+        &self,
+        secret: &str,
+        sign_in: &NewSignIn<'_>,
+        now: i64,
+    ) -> Result<(Account, String)> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let link = Self::reconnect_by_secret(&tx, secret, now)?
+            .ok_or(AccountError::ReconnectDoesNotWork)?;
+        let account =
+            Self::account_in(&tx, &link.account)?.ok_or(AccountError::ReconnectDoesNotWork)?;
+        Self::add_sign_in_in(&tx, &account.id, sign_in, now)?;
+        let used = tx.execute(
+            "UPDATE reconnects SET used_at = ?2 WHERE id = ?1 AND used_at IS NULL",
+            params![link.id, now],
+        )?;
+        if used == 0 {
+            return Err(AccountError::ReconnectDoesNotWork);
+        }
+        let session = Self::new_session_in(&tx, &account.id, now)?;
+        tx.commit()?;
+        Ok((account, session))
     }
 
     /// Change what an account is called.

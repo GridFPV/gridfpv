@@ -44,6 +44,13 @@ account, they see the events they flew and where they placed.
 You tie them together on the [Pilots](#/help/pilots) page, with **Account**. Or you bring
 pilots in from the server with **Add from the server**.
 
+## Someone cannot sign in
+
+There are no passwords on a server. People sign in with Discord or Google. If someone in
+your club loses that account, ask an owner of the server. On the server's page, the owner
+can take the old sign-in off and send the person a **re-connect link**. The person opens
+it, signs in another way, and is back in their own account with their results.
+
 ## Signing up from anywhere
 
 A pilot who is tied to their account can sign up for a heat on the server's page, from

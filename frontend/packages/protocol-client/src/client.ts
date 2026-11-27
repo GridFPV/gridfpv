@@ -39,7 +39,10 @@ import type {
   EventMeta,
   EventView,
   Format,
+  AccountSignIns,
   InviteMade,
+  ReconnectMade,
+  ReconnectView,
   LinkTokenMade,
   LinkTokenView,
   InviteRequest,
@@ -967,6 +970,92 @@ export async function acceptServerInvite(
     `/api/invites/${encodeURIComponent(secret)}/accept`,
     { method: 'POST', fetch: options.fetch },
     'use the invite'
+  );
+}
+
+const accountPath = (account: string, rest: string): string =>
+  `/api/accounts/${encodeURIComponent(account)}/${rest}`;
+
+/**
+ * How an account signs in, and whether it has a re-connect link waiting
+ * (`GET /api/accounts/{account}/sign-ins`). For an owner of the server.
+ */
+export async function getAccountSignIns(
+  baseUrl: string,
+  account: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<AccountSignIns> {
+  return apiJson<AccountSignIns>(
+    baseUrl,
+    accountPath(account, 'sign-ins'),
+    options,
+    'read how the account signs in'
+  );
+}
+
+/**
+ * Take a sign-in off someone's account, even their last
+ * (`DELETE /api/accounts/{account}/sign-ins/{provider}/{subject}`). For an owner. The
+ * account is signed out everywhere.
+ */
+export async function dropAccountSignIn(
+  baseUrl: string,
+  account: string,
+  provider: string,
+  subject: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<AccountSignIns> {
+  return apiJson<AccountSignIns>(
+    baseUrl,
+    accountPath(account, `sign-ins/${encodeURIComponent(provider)}/${encodeURIComponent(subject)}`),
+    { method: 'DELETE', fetch: options.fetch },
+    'take the sign-in off'
+  );
+}
+
+/**
+ * Make a link that lets someone back in to an account
+ * (`POST /api/accounts/{account}/reconnect`). For an owner. The link's secret is in the
+ * answer, this once.
+ */
+export async function makeAccountReconnect(
+  baseUrl: string,
+  account: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ReconnectMade> {
+  return apiJson<ReconnectMade>(
+    baseUrl,
+    accountPath(account, 'reconnect'),
+    { method: 'POST', fetch: options.fetch },
+    'make the re-connect link'
+  );
+}
+
+/** Take an account's re-connect link back (`DELETE /api/accounts/{account}/reconnect`). */
+export async function revokeAccountReconnect(
+  baseUrl: string,
+  account: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    accountPath(account, 'reconnect'),
+    { method: 'DELETE', fetch: options.fetch },
+    'take the re-connect link back'
+  );
+}
+
+/** Whose account a re-connect link is for, when it still works (`GET /api/reconnect/{secret}`). */
+export async function getServerReconnect(
+  baseUrl: string,
+  secret: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ReconnectView> {
+  return apiJson<ReconnectView>(
+    baseUrl,
+    `/api/reconnect/${encodeURIComponent(secret)}`,
+    options,
+    'read the re-connect link'
   );
 }
 

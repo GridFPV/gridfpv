@@ -40,6 +40,8 @@ enum Door {
     Runs,
     /// A signed-in account that holds a pilot the event names.
     PilotOfEvent,
+    /// An owner of the server, and nobody else: not even a club's director.
+    Owner,
 }
 
 /// Every route, who it is for, and a body it would take.
@@ -96,6 +98,27 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
         (Method::GET, "/api/me", Anyone, None),
         (Method::POST, "/api/sign-out", Anyone, None),
         (Method::GET, "/api/invites/{secret}", Anyone, None),
+        (Method::GET, "/api/reconnect/{secret}", Anyone, None),
+        // ── Helping someone who cannot sign in ──────────────────────────────
+        (Method::GET, "/api/accounts/{account}/sign-ins", Owner, None),
+        (
+            Method::DELETE,
+            "/api/accounts/{account}/sign-ins/{provider}/{subject}",
+            Owner,
+            None,
+        ),
+        (
+            Method::POST,
+            "/api/accounts/{account}/reconnect",
+            Owner,
+            None,
+        ),
+        (
+            Method::DELETE,
+            "/api/accounts/{account}/reconnect",
+            Owner,
+            None,
+        ),
         // ── An account's own things ─────────────────────────────────────────
         (
             Method::PATCH,
@@ -558,7 +581,12 @@ async fn each_route_turns_away_everyone_it_is_not_for() {
                     assert_eq!(status, StatusCode::UNAUTHORIZED, "token {token:?}: {what}");
                 }
             }
-            Door::Account | Door::Member | Door::Answers | Door::Runs | Door::PilotOfEvent => {
+            Door::Account
+            | Door::Member
+            | Door::Answers
+            | Door::Runs
+            | Door::PilotOfEvent
+            | Door::Owner => {
                 let (status, _) = ask(Who::Nobody).await;
                 assert_eq!(status, StatusCode::UNAUTHORIZED, "nobody: {what}");
                 // A link token is not a sign-in.
@@ -591,6 +619,12 @@ async fn each_route_turns_away_everyone_it_is_not_for() {
                         ("the owner", &rig.owner),
                         ("another club's director", &rig.elsewhere),
                     ],
+                    Door::Owner => &[
+                        ("a pilot", &rig.pilot),
+                        ("an approver", &rig.approver),
+                        ("a director", &rig.director),
+                        ("another club's director", &rig.elsewhere),
+                    ],
                     Door::Anyone | Door::Token => unreachable!(),
                 };
                 for (who, session) in refused {
@@ -615,6 +649,7 @@ async fn each_route_lets_in_the_least_person_it_is_for() {
             Door::Answers => Who::Session(&rig.approver),
             Door::Runs => Who::Session(&rig.director),
             Door::PilotOfEvent => Who::Session(&rig.flier),
+            Door::Owner => Who::Session(&rig.owner),
         };
         let (status, text) = send(&rig, who, &method, path, body, None).await;
         assert!(

@@ -19,6 +19,8 @@ export type ServerPlace =
   | { kind: 'sign-in'; problem?: string }
   /** An invite link. */
   | { kind: 'invite'; secret: string }
+  /** A re-connect link, for someone who can no longer sign in (§13.8). */
+  | { kind: 'reconnect'; secret: string }
   /** The signed-in account. */
   | { kind: 'account' }
   /** A club's members, invites and pilots, for those who look after it. */
@@ -34,6 +36,7 @@ export type ServerPlace =
  * - `#/here/‹club›/‹event›/‹code›`: one event, with the race code shown at the race
  * - `#/sign-in`, `#/sign-in?problem=‹code›`
  * - `#/invite/‹secret›`
+ * - `#/reconnect/‹secret›`
  * - `#/account`
  * - `#/club/‹club›`
  * - `#/results`
@@ -52,6 +55,7 @@ export function parseServerHash(hash: string): ServerPlace {
       return problem ? { kind: 'sign-in', problem } : { kind: 'sign-in' };
     }
     if (first === 'invite' && rest.length === 1) return { kind: 'invite', secret: rest[0] };
+    if (first === 'reconnect' && rest.length === 1) return { kind: 'reconnect', secret: rest[0] };
     if (first === 'account' && rest.length === 0) return { kind: 'account' };
     if (first === 'club' && rest.length === 1) return { kind: 'club', club: rest[0] };
     if (first === 'results' && rest.length === 0) return { kind: 'results' };
@@ -73,6 +77,8 @@ export function formatServerHash(place: ServerPlace): string {
       return place.problem ? `#/sign-in?problem=${encodeURIComponent(place.problem)}` : '#/sign-in';
     case 'invite':
       return `#/invite/${encodeURIComponent(place.secret)}`;
+    case 'reconnect':
+      return `#/reconnect/${encodeURIComponent(place.secret)}`;
     case 'account':
       return '#/account';
     case 'club':

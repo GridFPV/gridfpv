@@ -1696,6 +1696,33 @@ A server can hold more than one club, and a director usually belongs to one.
 - **The first build has one club,** made when the server is set up. Events are stored
   under a club from the start, so adding more clubs later changes nothing already stored.
 
+**More than one club (decided 2026-11-28, not built).** Ryan's answers:
+
+- **Who it is for.** First, an owner who hosts a few clubs they know. A big shared server
+  where strangers ask for a club comes later and stays small at first. No open sign-up
+  for clubs is built now.
+- **Server owners make clubs.** Nobody else does.
+- **Owners control everything, and people are told so.** The sign-in page and the club's
+  page say plainly that the owners of this server can see and change everything on it.
+- **A club has an id that never changes, and a friendly address that can.** The id is
+  random and is what the site's own links use. The friendly address is a short word made
+  from the club's name, for handing out. It changes when the club is renamed. An old
+  friendly address keeps leading to the club until another club takes that word.
+- **The front page is the person's primary club.** A signed-in person marks one of their
+  clubs as primary; it starts as the first one they joined. A visitor who is not signed in
+  sees the list of clubs, or the club itself when the server has only one.
+- **A club can be archived.** It leaves the main list and becomes read-only: pushes are
+  refused with a plain reason, and there are no new invites, sign-ups or check-ins. Its
+  results still open by link. An owner can bring it back. There is no true delete yet.
+- **Grid keeps a list of clubs.** In Grid's settings a director saves several clubs (an
+  address, a link token and a name). Each event picks one of them, or none. Today Grid
+  holds one link and sends every event to it.
+- **One person, several clubs.** One account, and a separate pilot entry in each club,
+  because each club's Director keeps its own pilot list. The account is what ties the
+  person together: their results page shows every club's events. The server never merges
+  two clubs' pilot entries, a callsign may differ from club to club, and no standings run
+  across clubs.
+
 ### 13.3 What a server stores
 
 **The whole event**, not a summary: every lap, ruling and change, with the pilots and
@@ -1775,6 +1802,21 @@ Video is not stored. It comes later (§11.7).
 - **Passkeys** are the way that needs no outside service: the phone's fingerprint, face or
   PIN. They come later. Until then, a server needs Discord or Google to have accounts.
 - **No passwords** for now. They are the most work and the most risk.
+- **Someone who can no longer sign in is helped by an owner of the server** (Ryan,
+  2026-11-28). With no passwords there is nothing to reset. The owner does two things,
+  from the club's members list:
+  - **Takes a sign-in off the account**, even the last one. The account is signed out
+    everywhere at once. This is for a stolen or closed provider account.
+  - **Makes a re-connect link** and sends it to the person. They open it and sign in with
+    a provider account they do have, and that sign-in is put on their old account. Roles,
+    pilots and results are untouched.
+  - The link works once and for seven days. An account has one at a time. It is as good
+    as the account, so the owner must be sure who gets it.
+  - A sign-in that another account already holds is refused, and the link is left to use.
+  - **Only an owner**, not a club's director: an account is for the whole server, so a
+    link into it reaches every club it is in.
+  - An owner who is locked out themselves uses the server's command line:
+    `gridfpv-server account list`, then `gridfpv-server account reconnect <id>`.
 - **A provider can do the claiming.** When the director puts a pilot's Discord account on
   the pilot, the results attach when that pilot signs in with Discord. That is proof of
   who they are, which a typed id is not (§13.7).
@@ -1820,7 +1862,6 @@ signed-in people only, video.
 
 ### 13.11 Not decided yet
 
-- How an owner helps a pilot who has lost every sign-in.
 - Whether a pilot's page at the race (§11.3) offers their personal invite when the
   Director is linked to a server.
 - How two servers agree to link an account, and how a hub fetches from a server.
@@ -1953,6 +1994,10 @@ code of §13.13.
     tokens.** The design gave tokens and clubs to owners first (§13.2, §13.6). With one
     club on a server, a director who could not do these would have to ask the owner for
     every laptop. Not confirmed.
+
+12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
+    sign-in and send a link to re-connect. Built for server owners and not for a club's
+    directors, for the reason in §13.8. Not confirmed.
 
 ### 13.13 A race day with no Wi-Fi for pilots (Wanted 2026-11-27; check-in built)
 

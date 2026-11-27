@@ -7,6 +7,8 @@
 //! gridfpv-server token revoke <id>     take a token back
 //! gridfpv-server club name <name>      name the club
 //! gridfpv-server owner invite          make a link that makes whoever opens it an owner
+//! gridfpv-server account list          the accounts, and how each signs in
+//! gridfpv-server account reconnect <id>   make a link that lets someone back in to an account
 //! ```
 //!
 //! Set from the environment:
@@ -43,7 +45,9 @@ const USAGE: &str = "usage:
   gridfpv-server token list            list the tokens
   gridfpv-server token revoke <id>     take a token back
   gridfpv-server club name <name>      name the club
-  gridfpv-server owner invite          make a link that makes its user an owner";
+  gridfpv-server owner invite          make a link that makes its user an owner
+  gridfpv-server account list          list the accounts, and how each signs in
+  gridfpv-server account reconnect <id>   make a link that lets someone back in";
 
 fn data_dir() -> PathBuf {
     std::env::var_os("GRIDFPV_SERVER_DATA_DIR")
@@ -62,6 +66,8 @@ fn main() -> ExitCode {
         ["token", "revoke", id] => token_revoke(id),
         ["club", "name", name] => club_name(name),
         ["owner", "invite"] => owner_invite(),
+        ["account", "list"] => account_list(),
+        ["account", "reconnect", id] => account_reconnect(id),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -219,6 +225,71 @@ fn owner_invite() -> Done {
     println!("  {base}/#/invite/{secret}");
     println!();
     println!("It works once, and for one day. It is not kept here and cannot be shown again.");
+    Ok(())
+}
+
+/// The address people open, or a stand-in to fill in by hand.
+fn link_base() -> String {
+    public_url()
+        .map(|url| url.trim().trim_end_matches('/').to_owned())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| "https://<your server>".to_owned())
+}
+
+/// Every account: its name, its id, and how it signs in.
+fn account_list() -> Done {
+    use gridfpv_serverd::accounts::Accounts;
+    let accounts = Accounts::open(&data_dir())?;
+    let all = accounts.all_accounts()?;
+    if all.is_empty() {
+        println!("No accounts yet. Make the first owner: gridfpv-server owner invite");
+        return Ok(());
+    }
+    for account in all {
+        let owner = accounts
+            .standing(&account.id)?
+            .is_some_and(|standing| standing.owner);
+        let keys: Vec<String> = accounts
+            .sign_ins(&account.id)?
+            .into_iter()
+            .map(|key| match key.label.as_str() {
+                "" => key.provider,
+                label => format!("{} ({label})", key.provider),
+            })
+            .collect();
+        let keys = if keys.is_empty() {
+            "no way to sign in".to_owned()
+        } else {
+            keys.join(", ")
+        };
+        let owner = if owner { "  owner" } else { "" };
+        println!("{}  {}{owner}  {keys}", account.id.0, account.name);
+    }
+    Ok(())
+}
+
+/// A link that lets whoever opens it and signs in back in to an account (§13.8). This is
+/// how an owner who has lost their own sign-in gets back in.
+fn account_reconnect(id: &str) -> Done {
+    use gridfpv_serverd::accounts::{AccountId, Accounts};
+    let accounts = Accounts::open(&data_dir())?;
+    let id = AccountId(id.to_owned());
+    let Some(account) = accounts.account(&id)? else {
+        return Err(format!(
+            "there is no account with the id {:?}. See them with: gridfpv-server account list",
+            id.0
+        )
+        .into());
+    };
+    let (_, secret) = accounts.new_reconnect(&id, None, gridfpv_serverd::people::now_ms())?;
+    println!(
+        "Send this link to {}. Whoever opens it and signs in gets into that account:",
+        account.name
+    );
+    println!();
+    println!("  {}/#/reconnect/{secret}", link_base());
+    println!();
+    println!("It works once, and for seven days. It is not kept here and cannot be shown again.");
     Ok(())
 }
 

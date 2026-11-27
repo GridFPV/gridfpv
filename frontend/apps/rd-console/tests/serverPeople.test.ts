@@ -69,6 +69,7 @@ describe('the account pages have addresses', () => {
       { kind: 'sign-in' },
       { kind: 'sign-in', problem: 'taken' },
       { kind: 'invite', secret: 'gfi_abc-DEF_123' },
+      { kind: 'reconnect', secret: 'gfr_abc-DEF_123' },
       { kind: 'account' },
       { kind: 'club', club: 'north club/1' }
     ];
@@ -83,6 +84,7 @@ describe('signInProblem', () => {
     const codes = [
       'need-invite',
       'invite',
+      'link',
       'refused',
       'expired',
       'taken',
@@ -94,6 +96,7 @@ describe('signInProblem', () => {
     for (const text of words) expect(text && text.length > 10).toBe(true);
     expect(signInProblem('need-invite')).toContain('invite');
     expect(signInProblem('taken')).toContain('another account');
+    expect(signInProblem('link')).toContain('re-connect link');
     // A code this build has never heard of still says something, and never the code itself.
     expect(signInProblem('<script>')).toBe('Signing in did not work. Try again in a moment.');
   });

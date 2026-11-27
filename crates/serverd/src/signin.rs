@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
-use crate::accounts::{AccountError, NewSignIn, PendingSignIn};
+use crate::accounts::{AccountError, NewSignIn, PendingSignIn, RECONNECT_PREFIX};
 use crate::app::AppState;
 use crate::people::{MaybeSigned, now_ms, session_cookie};
 
@@ -250,6 +250,8 @@ pub enum Problem {
     NeedInvite,
     /// The invite the person came with does not work.
     Invite,
+    /// The re-connect link the person came with does not work.
+    Link,
     /// The sign-in being added already belongs to another account.
     Taken,
     /// Adding was asked for, and nobody is signed in to add to.
@@ -265,6 +267,7 @@ impl Problem {
             Self::Provider => "provider",
             Self::NeedInvite => "need-invite",
             Self::Invite => "invite",
+            Self::Link => "link",
             Self::Taken => "taken",
             Self::NotSignedIn => "not-signed-in",
         }
@@ -557,6 +560,22 @@ pub async fn get_callback(
         return match accounts.add_sign_in(account, &sign_in, now) {
             Ok(()) => done("account", None),
             Err(AccountError::SignInTaken) => go_problem(&state, &headers, Problem::Taken),
+            Err(_) => go_problem(&state, &headers, Problem::Provider),
+        };
+    }
+
+    // Getting back in with a re-connect link an owner made (§13.8): the sign-in goes on
+    // that link's account. One that another account holds is refused, and nobody is
+    // signed in: the person meant to bring a sign-in they are not already using here.
+    if let Some(link) = pending
+        .invite
+        .as_deref()
+        .filter(|secret| secret.starts_with(RECONNECT_PREFIX))
+    {
+        return match accounts.reconnect(link, &sign_in, now) {
+            Ok((_, session)) => done("account", Some(&session)),
+            Err(AccountError::SignInTaken) => go_problem(&state, &headers, Problem::Taken),
+            Err(AccountError::ReconnectDoesNotWork) => go_problem(&state, &headers, Problem::Link),
             Err(_) => go_problem(&state, &headers, Problem::Provider),
         };
     }

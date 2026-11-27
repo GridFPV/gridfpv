@@ -30,9 +30,17 @@ import {
   setClubPilotHolder,
   setClubRole,
   signInUrl,
-  signOutOfServer
+  signOutOfServer,
+  getAccountSignIns,
+  dropAccountSignIn,
+  makeAccountReconnect,
+  revokeAccountReconnect,
+  getServerReconnect
 } from '@gridfpv/protocol-client';
 import type {
+  AccountSignIns,
+  ReconnectMade,
+  ReconnectView,
   ClubPilotView,
   ClubRole,
   InviteMade,
@@ -92,6 +100,15 @@ export interface PeopleApi {
   clubEvents(club: string): Promise<ServerEvent[]>;
   hideEvent(club: string, event: string, hidden: boolean): Promise<void>;
   removeEvent(club: string, event: string): Promise<void>;
+  /** How an account signs in, and whether a re-connect link waits. For an owner, as is everything below. */
+  accountSignIns(account: string): Promise<AccountSignIns>;
+  /** Take a sign-in off someone's account, even their last. They are signed out everywhere. */
+  dropSignIn(account: string, provider: string, subject: string): Promise<AccountSignIns>;
+  /** Make a link that lets someone back in. The secret is in the answer, this once. */
+  makeReconnect(account: string): Promise<ReconnectMade>;
+  revokeReconnect(account: string): Promise<void>;
+  /** Whose account a re-connect link is for. For whoever opens the link. */
+  reconnect(secret: string): Promise<ReconnectView>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -126,6 +143,12 @@ export function peopleApi(baseUrl: string): PeopleApi {
     revokeLinkToken: (club, id) => revokeClubLinkToken(baseUrl, club, id),
     clubEvents: (club) => listServerEvents(baseUrl, club),
     hideEvent: (club, event, hidden) => setServerEventHidden(baseUrl, club, event, hidden),
+    accountSignIns: (account) => getAccountSignIns(baseUrl, account),
+    dropSignIn: (account, provider, subject) =>
+      dropAccountSignIn(baseUrl, account, provider, subject),
+    makeReconnect: (account) => makeAccountReconnect(baseUrl, account),
+    revokeReconnect: (account) => revokeAccountReconnect(baseUrl, account),
+    reconnect: (secret) => getServerReconnect(baseUrl, secret),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }
@@ -140,12 +163,14 @@ export function signInProblem(code: string | undefined): string | undefined {
       return 'You need an invite to make an account here. Ask your club for a link.';
     case 'invite':
       return 'That invite does not work. It may have been used already, or have run out.';
+    case 'link':
+      return 'That re-connect link does not work. It may have been used already, taken back, or have run out. Ask for a new one.';
     case 'refused':
       return 'You were not signed in. Try again when you are ready.';
     case 'expired':
       return 'That took too long, or was started somewhere else. Try again.';
     case 'taken':
-      return 'That sign-in already belongs to another account here.';
+      return 'That sign-in already belongs to another account here. Pick one that no account here uses.';
     case 'not-signed-in':
       return 'Sign in first, then add another way to sign in.';
     case 'not-set-up':
@@ -178,6 +203,16 @@ export function inviteStanding(invite: InviteView, now: number): string {
   if (invite.expires_at !== undefined && invite.expires_at <= now) return 'Ran out';
   if (invite.max_uses === 1) return 'Not used yet';
   return `${invite.uses} of ${invite.max_uses} used`;
+}
+
+/** The link for a re-connect link's secret, as a person would open it. */
+export function reconnectLink(origin: string, secret: string): string {
+  return `${origin.replace(/\/$/, '')}/#/reconnect/${encodeURIComponent(secret)}`;
+}
+
+/** The day a re-connect link stops working, in words: "until 4 December". */
+export function untilDay(at: number, locale?: string): string {
+  return `until ${new Date(at).toLocaleDateString(locale, { day: 'numeric', month: 'long' })}`;
 }
 
 /** The link for an invite's secret, as a person would open it. */
