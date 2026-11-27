@@ -10,6 +10,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::accounts::Accounts;
+use crate::asks::{self, Asks};
 use crate::book::{Book, BookError};
 use crate::claims;
 use crate::page::Page;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub public_url: Option<String>,
     /// The providers people can sign in with here (`signin`).
     pub providers: Arc<Vec<Provider>>,
+    /// What pilots have asked for that a Director has yet to answer (`asks`).
+    pub asks: Arc<Asks>,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
             accounts: Arc::new(accounts),
             public_url: None,
             providers: Arc::default(),
+            asks: Arc::default(),
         })
     }
 }
@@ -150,7 +154,11 @@ pub fn router(state: AppState) -> Router {
                 .route("/event/pilots", get(read::get_pilots))
                 .route("/event/classes", get(read::get_classes))
                 .route("/event/timers", get(read::get_timers))
-                .route("/event/channels", get(read::get_channels)),
+                .route("/event/channels", get(read::get_channels))
+                // A signed-in pilot asks the Director for a spot (§13.4).
+                .route("/pilot/signup/take", axum::routing::post(asks::post_take))
+                .route("/pilot/signup/next", axum::routing::post(asks::post_next))
+                .route("/pilot/signup/leave", axum::routing::post(asks::post_leave)),
         )
         .route("/api/sign-in/providers", get(signin::get_providers))
         .route("/auth/{provider}/start", get(signin::get_start))
@@ -198,6 +206,12 @@ pub fn router(state: AppState) -> Router {
             get(claims::get_push_pilots).put(claims::put_push_pilots),
         )
         .route("/push/members", get(claims::get_push_members))
+        .route("/push/listen", get(asks::get_listen))
+        .route("/push/requests", get(asks::get_requests))
+        .route(
+            "/push/requests/{id}",
+            axum::routing::post(asks::post_answer),
+        )
         .route(
             "/push/pilots/{pilot}/account",
             axum::routing::put(claims::put_push_account).delete(claims::delete_push_account),

@@ -42,6 +42,19 @@ account, they see the events they flew and where they placed.
 You tie them together on the [Pilots](#/help/pilots) page, with **Account**. Or you bring
 pilots in from the server with **Add from the server**.
 
+## Signing up from anywhere
+
+A pilot who is tied to their account can sign up for a heat on the server's page, from
+home or on the way to the field. They open the event there and use the **Sign up** tab.
+It is the same sheet they get on their phone at the race.
+
+- Sign-up must be on for the phase, and open. You set that on the
+  [Phases](#/help/phases) page, as always.
+- Grid decides each ask on your computer, by the same rules as at the race. The server
+  only passes it on.
+- It works for the event that is **open** in Grid, and only while Grid is connected to the
+  server. When it is not, the pilot is told to try again or sign up at the race.
+
 If the internet drops, keep racing. Grid sends what was missed when it is back.
 
 ## The list of events

@@ -233,3 +233,6 @@ export type * from '@bindings/LinkPeople';
 export type * from '@bindings/PilotAccount';
 export type * from '@bindings/PilotAccountChange';
 export type * from '@bindings/PullRequest';
+export type * from '@bindings/PilotAsk';
+export type * from '@bindings/PushAnswer';
+export type * from '@bindings/PushRequest';

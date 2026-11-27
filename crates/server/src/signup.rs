@@ -86,6 +86,46 @@ fn run(
     })
 }
 
+/// Decide an ask a pilot made on the linked server (docs/primitives.md §13.4).
+///
+/// It is decided exactly as if the pilot had asked at the race: as the pilot's own, under
+/// every rule of the phase. The server says which pilot; the Director checks it has that
+/// pilot, and only ever acts on the event that is open.
+pub fn decide(
+    registry: &EventRegistry,
+    request: &crate::remote::PushRequest,
+) -> Result<(), String> {
+    use crate::remote::PilotAsk;
+    let open = registry.active().map(|event| event.id);
+    if open.as_ref() != Some(&request.event) {
+        return Err("That event is not the one open at the race right now.".to_owned());
+    }
+    if !registry.pilots().exists(&request.pilot) {
+        return Err("The race computer does not have that pilot.".to_owned());
+    }
+    let pilot = request.pilot.clone();
+    let by = SignupBy::Pilot;
+    let command = match request.ask.clone() {
+        PilotAsk::Take { heat, seat } => SignupCommand::Take {
+            heat,
+            seat,
+            pilot,
+            by,
+        },
+        PilotAsk::Next { phase, seat } => SignupCommand::TakeNext {
+            phase,
+            seat,
+            pilot,
+            by,
+        },
+        PilotAsk::Leave { heat } => SignupCommand::Leave { heat, pilot, by },
+    };
+    with_event(registry, &request.event, |session| {
+        session.commands(vec![Command::Signup(command)])
+    })
+    .map_err(|refused| refused.message)
+}
+
 /// `POST /public/pilot/signup/take` — the signed-in pilot takes a seat in a heat.
 pub async fn post_take(
     State(registry): State<EventRegistry>,

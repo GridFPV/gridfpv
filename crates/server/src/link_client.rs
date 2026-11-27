@@ -12,7 +12,8 @@ use gridfpv_storage::{Chain, RawEntry};
 use crate::events::EventId;
 use crate::link::{LinkStored, LinkTrust};
 use crate::remote::{
-    PushAccount, PushHeader, PushHello, PushPilot, PushPilotAccount, PushRefused, PushStatus,
+    PushAccount, PushAnswer, PushHeader, PushHello, PushPilot, PushPilotAccount, PushRefused,
+    PushRequest, PushStatus,
 };
 
 /// What went wrong talking to the server, in words for the director.
@@ -189,6 +190,49 @@ impl Client {
             return Ok(());
         }
         Err(Self::unexpected(response).await)
+    }
+
+    /// Open the stream the server tells this Director things on (`GET /push/listen`). It
+    /// stays open: read it a piece at a time with [`reqwest::Response::chunk`]. The server
+    /// writes to it every few seconds, so a long silence means the connection is dead.
+    pub async fn listen(&self) -> Result<reqwest::Response, PushError> {
+        let response = self
+            .send(
+                self.request(reqwest::Method::GET, "/push/listen")
+                    // No end is set for the whole answer: it never ends by itself.
+                    .timeout(Duration::from_secs(60 * 60 * 24 * 365)),
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::unexpected(response).await);
+        }
+        Ok(response)
+    }
+
+    /// What pilots have asked for on the server and nobody has answered.
+    pub async fn requests(&self) -> Result<Vec<PushRequest>, PushError> {
+        let response = self
+            .send(self.request(reqwest::Method::GET, "/push/requests"))
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::unexpected(response).await);
+        }
+        Self::read(response).await
+    }
+
+    /// Answer one ask. `false` when the pilot is no longer waiting for it.
+    pub async fn answer(&self, id: &str, answer: &PushAnswer) -> Result<bool, PushError> {
+        let path = format!("/push/requests/{id}");
+        let response = self
+            .send(self.request(reqwest::Method::POST, &path).json(answer))
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            return Err(Self::unexpected(response).await);
+        }
+        Ok(true)
     }
 
     /// The club's pilots as the server knows them, each with the account that holds it.

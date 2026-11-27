@@ -290,6 +290,15 @@ pub async fn sync_pilots(
     Ok(())
 }
 
+/// The task that listens to the server, stopped when this is dropped.
+struct Listening(JoinHandle<()>);
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Start pushing. Runs until aborted.
 pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -326,6 +335,11 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
             };
             desk.report_server(hello.club, hello.version);
             desk.report(LinkState::Connected);
+            // While connected, hear what pilots ask for on the server (§13.4). It stops
+            // when this connection is given up, below.
+            let _listening = Client::new(&stored)
+                .ok()
+                .map(|client| Listening(crate::listen::spawn(registry.clone(), client)));
 
             // Connected. Push until the settings change or the server stops answering.
             let mut memory = Memory::default();
