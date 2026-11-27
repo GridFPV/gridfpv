@@ -835,7 +835,7 @@ async fn what_is_not_there_is_not_found() {
     // The clubs are listed.
     assert_eq!(
         read_ok(&s, "/api/clubs").await,
-        json!([{"id": "club", "name": "My club", "word": "my-club", "archived": false}])
+        json!([{"id": "club", "name": "My club", "word": "my-club", "archived": false, "open": false}])
     );
 }
 

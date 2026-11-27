@@ -154,6 +154,7 @@ describe('lookedAfterClubs', () => {
     clubs: [],
     pilots: [],
     profile: {},
+    join_asks: [],
     ...over
   });
 

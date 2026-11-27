@@ -410,15 +410,15 @@ async fn a_new_name_shows_everywhere_the_club_is_named() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({ "id": "north", "name": "Northern Lights FPV", "word": "northern-lights-fpv", "archived": false })
+        json!({ "id": "north", "name": "Northern Lights FPV", "word": "northern-lights-fpv", "archived": false, "open": false })
     );
 
     let (_, clubs) = send(&rig, By::Nobody, Method::GET, "/api/clubs", None).await;
     assert_eq!(
         clubs,
         json!([
-            { "id": "north", "name": "Northern Lights FPV", "word": "northern-lights-fpv", "archived": false },
-            { "id": "south", "name": "South FPV", "word": "south-fpv", "archived": false },
+            { "id": "north", "name": "Northern Lights FPV", "word": "northern-lights-fpv", "archived": false, "open": false },
+            { "id": "south", "name": "South FPV", "word": "south-fpv", "archived": false, "open": false },
         ])
     );
     let (_, hello) = send(

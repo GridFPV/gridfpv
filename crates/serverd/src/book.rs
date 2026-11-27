@@ -52,6 +52,11 @@ pub struct Club {
     /// When an owner archived the club. An archived club is read-only and off the list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<i64>,
+    /// A public club: anyone with an account may join it (§13.7). When `false` the club is
+    /// private, and a person asks to join, uses an invite, or is added by a director. A
+    /// club starts private.
+    #[serde(default)]
+    pub open: bool,
 }
 
 /// The longest a friendly address may be.
@@ -239,6 +244,7 @@ impl Book {
                 word: word_of("My club"),
                 old_words: Vec::new(),
                 archived_at: None,
+                open: false,
             });
             book.write_file(&mut held)?;
         }
@@ -350,6 +356,7 @@ impl Book {
                 word,
                 old_words: Vec::new(),
                 archived_at: None,
+                open: false,
             };
             pages.clubs.push(club.clone());
             Ok(club)
@@ -427,6 +434,19 @@ impl Book {
         self.change(|pages| {
             pages.open_sign_up = open;
             Ok(open)
+        })
+    }
+
+    /// Make a club public (anyone with an account may join) or private (§13.7).
+    pub fn set_club_open(&self, id: &ClubId, open: bool) -> Result<Club, BookError> {
+        self.change(|pages| {
+            let club = pages
+                .clubs
+                .iter_mut()
+                .find(|club| &club.id == id)
+                .ok_or_else(|| BookError::NoSuchClub(id.0.clone()))?;
+            club.open = open;
+            Ok(club.clone())
         })
     }
 
@@ -629,6 +649,7 @@ mod tests {
                 word: "my-club".into(),
                 old_words: vec![],
                 archived_at: None,
+                open: false,
             }]
         );
         assert!(book.tokens().is_empty());

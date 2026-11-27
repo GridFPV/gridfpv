@@ -19,7 +19,8 @@ const OZ: MyAccount = {
   sign_ins: [{ provider: 'discord', subject: '900', label: 'oz' }],
   clubs: [],
   pilots: [],
-  profile: {}
+  profile: {},
+  join_asks: []
 };
 
 beforeEach(() => {
@@ -297,7 +298,8 @@ describe('the primary club', () => {
     const rows = () => screen.getAllByTestId('my-club');
     expect(rows()[0]).toHaveTextContent('North FPV');
     expect(rows()[0]).toHaveTextContent('Primary');
-    expect(within(rows()[0]).queryByRole('button')).toBeNull();
+    // The primary club has nothing to press about being primary.
+    expect(within(rows()[0]).queryByRole('button', { name: /primary/ })).toBeNull();
     expect(rows()[1]).not.toHaveTextContent('Primary');
     expect(screen.getByText('The front page opens on your primary club.')).toBeInTheDocument();
 

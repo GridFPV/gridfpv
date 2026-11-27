@@ -58,6 +58,7 @@
   import ServerAccount from './ServerAccount.svelte';
   import ServerClub from './ServerClub.svelte';
   import ServerInvite from './ServerInvite.svelte';
+  import ServerJoin from './ServerJoin.svelte';
   import ServerReconnect from './ServerReconnect.svelte';
   import ServerClubs from './ServerClubs.svelte';
   import ServerResults from './ServerResults.svelte';
@@ -70,7 +71,7 @@
     Partial<Pick<PublicSource, 'takeSpot' | 'takeNextSpot' | 'leaveSpot'>>;
 
   /** A club in the list: its friendly address and whether it is archived, when told. */
-  type ListedClub = PushClub & Partial<Pick<ClubOnServer, 'word' | 'archived'>>;
+  type ListedClub = PushClub & Partial<Pick<ClubOnServer, 'word' | 'archived' | 'open'>>;
 
   /** How a pilot asks the Director for an open seat from here, and gives one up. */
   interface SeatAsks {
@@ -589,6 +590,12 @@
         {#if club.archived}
           <p class="muted">This club is archived. Its events can still be looked at.</p>
         {/if}
+        <ServerJoin
+          api={people}
+          {club}
+          {account}
+          onchange={(me) => (account = me.account ?? null)}
+        />
         {#if wordedNow.events.length === 0}
           <p class="muted">No events yet.</p>
         {:else}

@@ -167,6 +167,8 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             Some(json!({"callsign": "Ace"})),
         ),
         (Method::POST, "/api/invites/{secret}/accept", Account, None),
+        (Method::POST, "/api/clubs/{club}/join", Account, None),
+        (Method::DELETE, "/api/clubs/{club}/join", Account, None),
         (Method::GET, "/api/me/results", Account, None),
         // ── Running a club ──────────────────────────────────────────────────
         (
@@ -204,6 +206,32 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
         ),
         (Method::DELETE, "/api/clubs/{club}/invites/{id}", Runs, None),
         (Method::GET, "/api/clubs/{club}/members", Runs, None),
+        (
+            Method::POST,
+            "/api/clubs/{club}/members",
+            Runs,
+            Some(json!({"account": "acct_nobody"})),
+        ),
+        (
+            Method::PUT,
+            "/api/clubs/{club}/open",
+            Runs,
+            Some(json!({"open": true})),
+        ),
+        (Method::GET, "/api/clubs/{club}/join-asks", Runs, None),
+        (
+            Method::PUT,
+            "/api/clubs/{club}/join-asks/{account}",
+            Runs,
+            None,
+        ),
+        (
+            Method::DELETE,
+            "/api/clubs/{club}/join-asks/{account}",
+            Runs,
+            None,
+        ),
+        (Method::GET, "/api/clubs/{club}/people", Runs, None),
         (
             Method::PUT,
             "/api/clubs/{club}/members/{account}",

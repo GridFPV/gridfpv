@@ -353,6 +353,8 @@ pub enum AccountError {
     NoSuchAccount,
     #[error("That account is not a member of the club.")]
     NotAMember,
+    #[error("That account has not asked to join the club.")]
+    NoSuchAsk,
     #[error("{0}")]
     Invalid(&'static str),
     #[error("the accounts could not be read or written: {0}")]
@@ -488,6 +490,12 @@ impl Accounts {
                 color          TEXT,
                 multigp_id     TEXT,
                 velocidrone_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS join_asks (
+                account  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                club     TEXT NOT NULL,
+                asked_at INTEGER NOT NULL,
+                PRIMARY KEY (account, club)
             );
             CREATE TABLE IF NOT EXISTS sign_ins (
                 provider TEXT NOT NULL,
@@ -1191,6 +1199,172 @@ impl Accounts {
         Ok(Self::account_in(&conn, account)?.expect("just updated"))
     }
 
+    // ── Joining a club (§13.7) ──────────────────────────────────────────────
+
+    fn role_in(conn: &Connection, club: &ClubId, account: &AccountId) -> Result<Option<Role>> {
+        let role: Option<String> = conn
+            .query_row(
+                "SELECT role FROM members WHERE account = ?1 AND club = ?2",
+                params![account.0, club.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(role.as_deref().and_then(Role::parse))
+    }
+
+    /// Put an account in a club as a pilot. Someone already in it keeps the role they
+    /// have. An ask of theirs that was waiting is done with. Returns the role they now
+    /// have.
+    ///
+    /// This does not ask whether the account may: a public club lets anyone in, and a
+    /// director may add anyone. The caller decides which this is.
+    pub fn add_member(&self, club: &ClubId, account: &AccountId, now: i64) -> Result<Role> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if Self::account_in(&tx, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        let role = match Self::role_in(&tx, club, account)? {
+            Some(role) => role,
+            None => {
+                tx.execute(
+                    "INSERT INTO members (account, club, role, added_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![account.0, club.0, Role::Pilot.as_str(), now],
+                )?;
+                Role::Pilot
+            }
+        };
+        tx.execute(
+            "DELETE FROM join_asks WHERE account = ?1 AND club = ?2",
+            params![account.0, club.0],
+        )?;
+        tx.commit()?;
+        Ok(role)
+    }
+
+    /// An account asks to join a club. Asking twice is asking once. Someone already in
+    /// the club has nothing to ask for: `false`, and nothing is kept.
+    pub fn ask_to_join(&self, club: &ClubId, account: &AccountId, now: i64) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if Self::account_in(&tx, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        if Self::role_in(&tx, club, account)?.is_some() {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO join_asks (account, club, asked_at) VALUES (?1, ?2, ?3)",
+            params![account.0, club.0, now],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Who has asked to join a club, the one who asked first at the top, with when.
+    pub fn join_asks(&self, club: &ClubId) -> Result<Vec<(Account, i64)>> {
+        let conn = self.lock();
+        let mut read = conn.prepare(
+            "SELECT a.id, a.name, a.created_at, j.asked_at FROM join_asks j
+             JOIN accounts a ON a.id = j.account
+             WHERE j.club = ?1 ORDER BY j.asked_at, a.id",
+        )?;
+        let rows = read.query_map(params![club.0], |row| {
+            Ok((
+                Account {
+                    id: AccountId(row.get(0)?),
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                },
+                row.get(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The clubs an account has asked to join and not yet heard from.
+    pub fn my_join_asks(&self, account: &AccountId) -> Result<Vec<ClubId>> {
+        let conn = self.lock();
+        let mut read =
+            conn.prepare("SELECT club FROM join_asks WHERE account = ?1 ORDER BY asked_at, club")?;
+        let rows = read.query_map(params![account.0], |row| Ok(ClubId(row.get(0)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Say yes to an account that asked to join: it is in the club as a pilot.
+    pub fn accept_join_ask(&self, club: &ClubId, account: &AccountId, now: i64) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let asked = tx.execute(
+            "DELETE FROM join_asks WHERE account = ?1 AND club = ?2",
+            params![account.0, club.0],
+        )?;
+        if asked == 0 {
+            return Err(AccountError::NoSuchAsk);
+        }
+        if Self::role_in(&tx, club, account)?.is_none() {
+            tx.execute(
+                "INSERT INTO members (account, club, role, added_at) VALUES (?1, ?2, ?3, ?4)",
+                params![account.0, club.0, Role::Pilot.as_str(), now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop an account's ask to join: the account took it back, or a director said no.
+    /// Returns whether there was one.
+    pub fn drop_join_ask(&self, club: &ClubId, account: &AccountId) -> Result<bool> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "DELETE FROM join_asks WHERE account = ?1 AND club = ?2",
+            params![account.0, club.0],
+        )? > 0)
+    }
+
+    /// Every ask to join a club is done with: the club was archived.
+    pub fn drop_join_asks_of(&self, club: &ClubId) -> Result<usize> {
+        let conn = self.lock();
+        Ok(conn.execute("DELETE FROM join_asks WHERE club = ?1", params![club.0])?)
+    }
+
+    /// Accounts on the server that are not in a club, whose name or callsign holds
+    /// `text`. For a director looking for someone to add. At most `limit`, by name.
+    ///
+    /// Letters match whatever their case. `%` and `_` in `text` are only themselves.
+    pub fn find_outside(
+        &self,
+        club: &ClubId,
+        text: &str,
+        limit: usize,
+    ) -> Result<Vec<(Account, Option<String>)>> {
+        let escaped = text
+            .trim()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let like = format!("%{escaped}%");
+        let conn = self.lock();
+        let mut read = conn.prepare(
+            "SELECT a.id, a.name, a.created_at, p.callsign FROM accounts a
+             LEFT JOIN profiles p ON p.account = a.id
+             WHERE (a.name LIKE ?2 ESCAPE '\\' OR p.callsign LIKE ?2 ESCAPE '\\')
+               AND NOT EXISTS (SELECT 1 FROM members m WHERE m.account = a.id AND m.club = ?1)
+             ORDER BY a.name COLLATE NOCASE, a.id LIMIT ?3",
+        )?;
+        let rows = read.query_map(params![club.0, like, limit as i64], |row| {
+            Ok((
+                Account {
+                    id: AccountId(row.get(0)?),
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                },
+                row.get(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // ── The pilot profile ───────────────────────────────────────────────────
 
     /// What an account says of itself as a pilot (§13.7). Empty until they fill it in.
@@ -1467,6 +1641,11 @@ impl Accounts {
                         |row| row.get(0),
                     )
                     .optional()?;
+                // They are in: an ask of theirs to join has its answer.
+                tx.execute(
+                    "DELETE FROM join_asks WHERE account = ?1 AND club = ?2",
+                    params![account.0, club.0],
+                )?;
                 // An invite never takes a role away: a director who opens the club's
                 // group link stays a director.
                 let keep = current

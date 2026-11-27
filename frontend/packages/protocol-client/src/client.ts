@@ -53,6 +53,7 @@ import type {
   LinkPeople,
   ClubSettings,
   PilotProfile,
+  PersonView,
   ServerInfo,
   LinkView,
   MainsRequest,
@@ -1022,6 +1023,124 @@ export async function setServerOpenSignUp(
     '/api/server/sign-up',
     { method: 'PUT', body: { open }, fetch: options.fetch },
     'change who may make an account'
+  );
+}
+
+/**
+ * Make a club public (anyone with an account may join) or private
+ * (`PUT /api/clubs/{club}/open`). For those who run the club.
+ */
+export async function setServerClubOpen(
+  baseUrl: string,
+  club: string,
+  open: boolean,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerClub> {
+  return apiJson<ServerClub>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/open`,
+    { method: 'PUT', body: { open }, fetch: options.fetch },
+    'change who can join the club'
+  );
+}
+
+/**
+ * Join a public club, or ask to join a private one (`POST /api/clubs/{club}/join`).
+ * Resolves to the account as it now stands.
+ */
+export async function joinServerClub(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/join`,
+    { method: 'POST', body: {}, fetch: options.fetch },
+    'join the club'
+  );
+}
+
+/**
+ * Take back an ask to join a club, or leave it (`DELETE /api/clubs/{club}/join`).
+ * Resolves to the account as it now stands.
+ */
+export async function leaveServerClub(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/join`,
+    { method: 'DELETE', fetch: options.fetch },
+    'leave the club'
+  );
+}
+
+/** Who has asked to join a club (`GET /api/clubs/{club}/join-asks`). For those who run it. */
+export async function listClubJoinAsks(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PersonView[]> {
+  return apiJson<PersonView[]>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/join-asks`,
+    options,
+    'read who asked to join'
+  );
+}
+
+/**
+ * Answer someone who asked to join a club: yes (`PUT`) or no (`DELETE`) to
+ * `/api/clubs/{club}/join-asks/{account}`.
+ */
+export async function answerClubJoinAsk(
+  baseUrl: string,
+  club: string,
+  account: string,
+  yes: boolean,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiJson<void>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/join-asks/${encodeURIComponent(account)}`,
+    { method: yes ? 'PUT' : 'DELETE', fetch: options.fetch },
+    yes ? 'let them into the club' : 'say no'
+  );
+}
+
+/**
+ * Accounts on the server that are not in a club, by name or callsign
+ * (`GET /api/clubs/{club}/people?q=`). For those who run the club.
+ */
+export async function findClubPeople(
+  baseUrl: string,
+  club: string,
+  text: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PersonView[]> {
+  return apiJson<PersonView[]>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/people?q=${encodeURIComponent(text)}`,
+    options,
+    'look for people'
+  );
+}
+
+/** Add an account to a club, as a pilot (`POST /api/clubs/{club}/members`). */
+export async function addClubMember(
+  baseUrl: string,
+  club: string,
+  account: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiJson<void>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/members`,
+    { method: 'POST', body: { account }, fetch: options.fetch },
+    'add them to the club'
   );
 }
 

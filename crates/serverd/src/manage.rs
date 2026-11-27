@@ -59,6 +59,9 @@ pub struct ServerClub {
     pub word: String,
     /// Read-only, and off the list of clubs.
     pub archived: bool,
+    /// A public club: anyone with an account may join it. Otherwise a person asks to
+    /// join, uses an invite, or is added by a director (§13.7).
+    pub open: bool,
 }
 
 impl From<Club> for ServerClub {
@@ -68,6 +71,7 @@ impl From<Club> for ServerClub {
             name: club.name,
             word: club.word,
             archived: club.archived_at.is_some(),
+            open: club.open,
         }
     }
 }
@@ -157,6 +161,8 @@ pub async fn put_archived(
         state
             .accounts
             .revoke_invites_of(&club.id, crate::people::now_ms())?;
+        // And an ask to join one has no answer coming.
+        state.accounts.drop_join_asks_of(&club.id)?;
     }
     Ok(Json(club.into()))
 }

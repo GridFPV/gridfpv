@@ -3,6 +3,7 @@ import type { MyClub } from "./MyClub";
 import type { MyPilot } from "./MyPilot";
 import type { MySignIn } from "./MySignIn";
 import type { PilotProfile } from "./PilotProfile";
+import type { PushClub } from "./PushClub";
 
 /**
  * The account this browser is signed in as.
@@ -26,4 +27,8 @@ pilots: Array<MyPilot>,
  * What they say of themselves as a pilot (§13.7): callsign, colour, and the ids they
  * have elsewhere. The same in every club.
  */
-profile: PilotProfile, };
+profile: PilotProfile, 
+/**
+ * The clubs they asked to join and have not heard from (§13.7).
+ */
+join_asks: Array<PushClub>, };

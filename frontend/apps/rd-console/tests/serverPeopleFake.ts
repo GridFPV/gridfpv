@@ -21,6 +21,7 @@ import type {
   MemberView,
   MyAccount,
   MyResult,
+  PersonView,
   PilotProfile,
   ServerEvent,
   ServerInfo,
@@ -42,7 +43,8 @@ export const ACE: MyAccount = {
   sign_ins: [{ provider: 'discord', subject: '111', label: 'ace_fpv' }],
   clubs: [{ club: NORTH, role: 'Director' }],
   pilots: [],
-  profile: {}
+  profile: {},
+  join_asks: []
 };
 
 /** When a re-connect link made here stops working: 4 December 2026, midday. */
@@ -79,6 +81,10 @@ export interface FakeServer {
   signedOut: string[];
   /** Whether someone with no invite may make an account. */
   openSignUp: boolean;
+  /** Who has asked to join each club, the first to ask at the top. */
+  joinAsks: Record<string, PersonView[]>;
+  /** Everyone with an account on the server, in a club or not. */
+  people: PersonView[];
 }
 
 /** An event a club holds on the server. */
@@ -123,13 +129,18 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     reconnects: {},
     signedOut: [],
     openSignUp: false,
+    joinAsks: {},
+    people: [],
     clubList: [
-      { ...NORTH, word: 'north-fpv', archived: false },
-      { ...SOUTH, word: 'south-fpv', archived: false }
+      { ...NORTH, word: 'north-fpv', archived: false, open: false },
+      { ...SOUTH, word: 'south-fpv', archived: false, open: false }
     ],
     ...over
   };
 }
+
+const ARCHIVED =
+  'This club is archived, so nothing in it can be changed. An owner of this server can bring it back.';
 
 const refuse = (message: string): never => {
   throw new Error(message);
@@ -438,7 +449,8 @@ export function fakePeople(server: FakeServer) {
         id: `cmade${made}`,
         name: name.trim(),
         word: taken ? `${base}-2` : base,
-        archived: false
+        archived: false,
+        open: false
       };
       server.clubList.push(club);
       return { ...club };
@@ -450,6 +462,96 @@ export function fakePeople(server: FakeServer) {
       }
       server.account = { ...account, primary: club };
       return me();
+    }),
+    setClubOpen: vi.fn(async (club: string, open: boolean): Promise<ServerClub> => {
+      runsClub(club);
+      const found =
+        server.clubList.find((c) => c.id === club) ?? refuse('This server has no such club.');
+      if (found.archived) refuse(ARCHIVED);
+      found.open = open;
+      return { ...found };
+    }),
+    joinClub: vi.fn(async (club: string) => {
+      const account = server.account ?? refuse('Sign in first.');
+      const found =
+        server.clubList.find((c) => c.id === club) ?? refuse('This server has no such club.');
+      if (found.archived) refuse(ARCHIVED);
+      if (account.clubs.some((entry) => entry.club.id === club)) return me();
+      const listed = { id: found.id, name: found.name };
+      if (found.open) {
+        server.account = {
+          ...account,
+          clubs: [...account.clubs, { club: listed, role: 'Pilot' }],
+          join_asks: account.join_asks.filter((asked) => asked.id !== club)
+        };
+        (server.members[club] ??= []).push({ id: account.id, name: account.name, role: 'Pilot' });
+      } else if (!account.join_asks.some((asked) => asked.id === club)) {
+        server.account = { ...account, join_asks: [...account.join_asks, listed] };
+        (server.joinAsks[club] ??= []).push({
+          id: account.id,
+          name: account.name,
+          ...(account.profile.callsign ? { callsign: account.profile.callsign } : {}),
+          asked_at: 1_700_000_000_000
+        });
+      }
+      return me();
+    }),
+    leaveClub: vi.fn(async (club: string) => {
+      const account = server.account ?? refuse('Sign in first.');
+      const asked = account.join_asks.some((entry) => entry.id === club);
+      const mine = account.clubs.find((entry) => entry.club.id === club);
+      if (!asked && !mine) refuse('You are not in that club, and have not asked to join it.');
+      const directors = (server.members[club] ?? []).filter((m) => m.role === 'Director').length;
+      if (mine?.role === 'Director' && directors <= 1) {
+        refuse('A club must keep at least one director.');
+      }
+      server.account = {
+        ...account,
+        clubs: account.clubs.filter((entry) => entry.club.id !== club),
+        join_asks: account.join_asks.filter((entry) => entry.id !== club),
+        pilots: account.pilots.filter((pilot) => pilot.club.id !== club)
+      };
+      server.joinAsks[club] = (server.joinAsks[club] ?? []).filter((p) => p.id !== account.id);
+      server.members[club] = (server.members[club] ?? []).filter((m) => m.id !== account.id);
+      return me();
+    }),
+    joinAsks: vi.fn(async (club: string): Promise<PersonView[]> => {
+      runsClub(club);
+      return (server.joinAsks[club] ?? []).map((person) => ({ ...person }));
+    }),
+    answerJoinAsk: vi.fn(async (club: string, account: string, yes: boolean) => {
+      runsClub(club);
+      const list = server.joinAsks[club] ?? [];
+      const person =
+        list.find((p) => p.id === account) ??
+        refuse('That account has not asked to join the club.');
+      server.joinAsks[club] = list.filter((p) => p.id !== account);
+      if (yes)
+        (server.members[club] ??= []).push({ id: person.id, name: person.name, role: 'Pilot' });
+    }),
+    findPeople: vi.fn(async (club: string, text: string): Promise<PersonView[]> => {
+      runsClub(club);
+      const wanted = text.trim().toLowerCase();
+      if (wanted.length < 2) return [];
+      const inside = new Set((server.members[club] ?? []).map((m) => m.id));
+      return server.people
+        .filter((p) => !inside.has(p.id))
+        .filter(
+          (p) =>
+            p.name.toLowerCase().includes(wanted) ||
+            (p.callsign ?? '').toLowerCase().includes(wanted)
+        )
+        .map((p) => ({ ...p }));
+    }),
+    addMember: vi.fn(async (club: string, account: string) => {
+      runsClub(club);
+      const person =
+        server.people.find((p) => p.id === account) ?? refuse('There is no such account.');
+      const list = (server.members[club] ??= []);
+      if (!list.some((m) => m.id === account)) {
+        list.push({ id: person.id, name: person.name, role: 'Pilot' });
+      }
+      server.joinAsks[club] = (server.joinAsks[club] ?? []).filter((p) => p.id !== account);
     }),
     setProfile: vi.fn(async (profile: PilotProfile) => {
       const account = server.account ?? refuse('Sign in first.');

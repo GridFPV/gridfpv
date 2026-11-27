@@ -42,7 +42,14 @@ import {
   setServerPrimaryClub,
   setServerProfile,
   getServerInfo,
-  setServerOpenSignUp
+  setServerOpenSignUp,
+  setServerClubOpen,
+  joinServerClub,
+  leaveServerClub,
+  listClubJoinAsks,
+  answerClubJoinAsk,
+  findClubPeople,
+  addClubMember
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
@@ -61,6 +68,7 @@ import type {
   MyAccount,
   MyClassResult,
   MyResult,
+  PersonView,
   PilotProfile,
   ServerEvent,
   ServerInfo,
@@ -133,6 +141,20 @@ export interface PeopleApi {
   serverInfo(): Promise<ServerInfo>;
   /** Say whether someone with no invite may make an account. For an owner. */
   setOpenSignUp(open: boolean): Promise<ServerInfo>;
+  /** Make a club public (anyone with an account may join) or private. For those who run it. */
+  setClubOpen(club: string, open: boolean): Promise<ServerClub>;
+  /** Join a public club, or ask to join a private one. */
+  joinClub(club: string): Promise<Me>;
+  /** Take back an ask to join a club, or leave it. */
+  leaveClub(club: string): Promise<Me>;
+  /** Who has asked to join a club, the first to ask at the top. For those who run it. */
+  joinAsks(club: string): Promise<PersonView[]>;
+  /** Say yes or no to someone who asked to join. */
+  answerJoinAsk(club: string, account: string, yes: boolean): Promise<void>;
+  /** Accounts not in a club, by name or callsign. Nobody for fewer than two letters. */
+  findPeople(club: string, text: string): Promise<PersonView[]>;
+  /** Add an account to a club, as a pilot. */
+  addMember(club: string, account: string): Promise<void>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -180,6 +202,13 @@ export function peopleApi(baseUrl: string): PeopleApi {
     setProfile: (profile) => setServerProfile(baseUrl, profile),
     serverInfo: () => getServerInfo(baseUrl),
     setOpenSignUp: (open) => setServerOpenSignUp(baseUrl, open),
+    setClubOpen: (club, open) => setServerClubOpen(baseUrl, club, open),
+    joinClub: (club) => joinServerClub(baseUrl, club),
+    leaveClub: (club) => leaveServerClub(baseUrl, club),
+    joinAsks: (club) => listClubJoinAsks(baseUrl, club),
+    answerJoinAsk: (club, account, yes) => answerClubJoinAsk(baseUrl, club, account, yes),
+    findPeople: (club, text) => findClubPeople(baseUrl, club, text),
+    addMember: (club, account) => addClubMember(baseUrl, club, account),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }
@@ -247,6 +276,38 @@ export function profileChanged(form: ProfileForm, profile: PilotProfile | undefi
  */
 export function pilotName(account: { name: string; profile?: PilotProfile }): string {
   return account.profile?.callsign?.trim() || account.name;
+}
+
+/** Where an account stands with a club it may want to join. */
+export type JoinStanding =
+  /** Nobody is signed in. */
+  | 'signed-out'
+  /** Already in the club. */
+  | 'member'
+  /** Asked, and waiting for a director. */
+  | 'asked'
+  /** A public club: joining is one press. */
+  | 'can-join'
+  /** A private club: a director says yes. */
+  | 'can-ask'
+  /** An archived club takes nobody. */
+  | 'closed';
+
+export function joinStanding(
+  account: Pick<MyAccount, 'clubs' | 'join_asks'> | null | undefined,
+  club: { id: string; open?: boolean; archived?: boolean }
+): JoinStanding {
+  if (club.archived) return 'closed';
+  if (!account) return 'signed-out';
+  if (account.clubs.some((entry) => entry.club.id === club.id)) return 'member';
+  if ((account.join_asks ?? []).some((asked) => asked.id === club.id)) return 'asked';
+  return club.open ? 'can-join' : 'can-ask';
+}
+
+/** Someone as a director is shown them: their name, and their callsign when it differs. */
+export function personLabel(person: { name: string; callsign?: string }): string {
+  const callsign = person.callsign?.trim();
+  return callsign && callsign !== person.name ? `${person.name} (${callsign})` : person.name;
 }
 
 /** What the sign-in page says of making an account, by the owner's choice. */
