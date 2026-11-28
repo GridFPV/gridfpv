@@ -221,14 +221,21 @@ A token that is taken back stops working straight away.
 
 ## Finding your way around the page
 
-The top of the server's page has up to four parts. You see only the ones that are yours.
+The server's page has two areas.
 
-| Part | Who sees it | What is there |
-| --- | --- | --- |
-| **Events** | everyone | events, clubs, and your own results |
-| **Account** | anyone signed in | your profile, your clubs, and how you sign in |
-| **Club** | directors and approvers | members, invites, pilots, events, link tokens, settings |
-| **Server** | owners | clubs, sign-in, email |
+- The **pilot area** is what everyone sees. It opens when you sign in.
+- The **admin area** is for running a club or the server. Its bar at the top is a
+  different colour and says **Admin**, so you always know which area you are in.
+
+If you run a club or the server, there is a **Pilot / Admin** switch at the top right.
+Press it to go from one area to the other. Nobody else sees the switch.
+
+| Area | Part | Who sees it | What is there |
+| --- | --- | --- | --- |
+| Pilot | **Events** | everyone | events, clubs, and your own results |
+| Pilot | **Account** | anyone signed in | your profile, your clubs, and how you sign in |
+| Admin | **Club** | directors and approvers | members, invites, pilots, events, link tokens, settings |
+| Admin | **Server** | owners | clubs, sign-in, email |
 
 Each part has its own row of pages beside it. If you run more than one club, the **Club**
 part has a box to pick which one.

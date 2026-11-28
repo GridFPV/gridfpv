@@ -120,7 +120,7 @@ test('an owner sets up email on the page, tests it, and people can use it at onc
   await expect(visitor.getByRole('button', { name: 'Forgot your password?' })).toBeVisible();
 
   // ── A wrong setting: the test says why, in the email server's own words. ──
-  await ryan.goto(`${server.baseUrl}/#/admin/email`);
+  await ryan.goto(`${server.baseUrl}/#/admin/server/email`);
   await ryan.getByLabel('Port', { exact: true }).fill('1');
   await ryan.getByTestId('email-setting').getByRole('button', { name: 'Save' }).click();
   await expect(ryan.getByTestId('email-saved')).toBeVisible();

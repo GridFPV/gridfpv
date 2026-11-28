@@ -263,14 +263,14 @@ describe('who may make an account', () => {
   const setting = () => screen.findByTestId('sign-up-setting');
 
   it('is not shown to someone who is not an owner', async () => {
-    const { people } = open('#/admin/sign-in', fakeServer({ account: ACE }));
+    const { people } = open('#/admin/server/sign-in', fakeServer({ account: ACE }));
     await screen.findByTestId('server-who');
     expect(screen.queryByTestId('sign-up-setting')).toBeNull();
     expect(people.setOpenSignUp).not.toHaveBeenCalled();
   });
 
   it('starts as invite only, and an owner lets anyone in after being asked', async () => {
-    const { people, server } = open('#/admin/sign-in', fakeServer({ account: OWNER }));
+    const { people, server } = open('#/admin/server/sign-in', fakeServer({ account: OWNER }));
     const block = await setting();
     await waitFor(() =>
       expect(within(block).getByTestId('sign-up-state')).toHaveTextContent('Invite only')
@@ -302,7 +302,7 @@ describe('who may make an account', () => {
 
   it('goes back to invites at once, with no question', async () => {
     const { people, server } = open(
-      '#/admin/sign-in',
+      '#/admin/server/sign-in',
       fakeServer({ account: OWNER, openSignUp: true })
     );
     const block = await setting();
@@ -319,7 +319,7 @@ describe('who may make an account', () => {
   });
 
   it('says why when the server refuses, and changes nothing', async () => {
-    const { people } = open('#/admin/sign-in', fakeServer({ account: OWNER }));
+    const { people } = open('#/admin/server/sign-in', fakeServer({ account: OWNER }));
     const block = await setting();
     people.setOpenSignUp.mockRejectedValueOnce(new Error('The server could not save that.'));
     await waitFor(() => expect(within(block).queryByRole('switch')).not.toBeNull());
@@ -332,7 +332,7 @@ describe('who may make an account', () => {
 
   it('says so when the setting cannot be read', async () => {
     const server = fakeServer({ account: OWNER });
-    location.hash = '#/admin/sign-in';
+    location.hash = '#/admin/server/sign-in';
     const people = fakePeople(server);
     people.serverInfo.mockRejectedValue(new Error('The server is not answering.'));
     render(ServerHome, {
@@ -368,7 +368,7 @@ describe('the sign-in page', () => {
   });
 
   it('follows the owner changing it, without the page being opened again', async () => {
-    open('#/admin/sign-in', fakeServer({ account: OWNER, openSignUp: true }));
+    open('#/admin/server/sign-in', fakeServer({ account: OWNER, openSignUp: true }));
     const block = await screen.findByTestId('sign-up-setting');
     await waitFor(() => expect(flip(block).checked).toBe(true));
     await fireEvent.click(flip(block));

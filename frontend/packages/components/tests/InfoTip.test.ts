@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
 import InfoTip from '../src/primitives/InfoTip.svelte';
@@ -61,6 +61,85 @@ describe('InfoTip', () => {
     expect(a).not.toBe(b);
     expect(document.getElementById(a!)).toHaveTextContent('One.');
     expect(document.getElementById(b!)).toHaveTextContent('Two.');
+  });
+});
+
+describe('where the bubble sits', () => {
+  /** A window of this size, a trigger at `by`, and a bubble of this size. */
+  function lay(
+    by: { left: number; top: number },
+    bubble = { width: 300, height: 80 },
+    win = { width: 1000, height: 600 }
+  ) {
+    vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(win.width);
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(win.height);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement
+    ) {
+      const box =
+        this.getAttribute('role') === 'tooltip'
+          ? { left: 0, top: 0, ...bubble }
+          : { ...by, width: 18, height: 18 };
+      return {
+        ...box,
+        x: box.left,
+        y: box.top,
+        right: box.left + box.width,
+        bottom: box.top + box.height,
+        toJSON: () => ({})
+      };
+    });
+  }
+  afterEach(() => vi.restoreAllMocks());
+
+  async function shown(label: string): Promise<HTMLElement> {
+    await fireEvent.mouseEnter(screen.getByRole('button', { name: label }).parentElement!);
+    return screen.getByRole('tooltip');
+  }
+
+  it('is fixed to the window, under its trigger, so a card cannot cut it off', async () => {
+    lay({ left: 200, top: 100 });
+    render(InfoTip, { text: 'Help.', label: 'About it' });
+    const bubble = await shown('About it');
+    expect(bubble.style.left).toBe('200px');
+    // Under the trigger (which ends at 118), with the gap.
+    expect(bubble.style.top).toBe('126px');
+  });
+
+  it('hangs from the other edge when asked to', async () => {
+    lay({ left: 600, top: 100 });
+    render(InfoTip, { text: 'Help.', label: 'About it', align: 'end' });
+    const bubble = await shown('About it');
+    // Its right edge is the trigger's right edge: 618 - 300.
+    expect(bubble.style.left).toBe('318px');
+  });
+
+  it('is pushed back in from the sides of the window', async () => {
+    lay({ left: 900, top: 100 });
+    render(InfoTip, { text: 'Help.', label: 'Right' });
+    expect((await shown('Right')).style.left).toBe('692px');
+    vi.restoreAllMocks();
+    lay({ left: 100, top: 100 });
+    render(InfoTip, { text: 'Help.', label: 'Left', align: 'end' });
+    await fireEvent.mouseEnter(screen.getByRole('button', { name: 'Left' }).parentElement!);
+    expect(screen.getAllByRole('tooltip')[1].style.left).toBe('8px');
+  });
+
+  it('goes above its trigger when there is no room below', async () => {
+    lay({ left: 200, top: 560 });
+    render(InfoTip, { text: 'Help.', label: 'About it' });
+    // Above the trigger, with the gap: 560 - 8 - 80.
+    expect((await shown('About it')).style.top).toBe('472px');
+  });
+
+  it('is placed when opened by a press or by the keyboard too', async () => {
+    lay({ left: 200, top: 100 });
+    render(InfoTip, { text: 'Help.', label: 'Pressed' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Pressed' }));
+    expect(screen.getByRole('tooltip').style.top).toBe('126px');
+    render(InfoTip, { text: 'Help.', label: 'Focused' });
+    await fireEvent.focusIn(screen.getByRole('button', { name: 'Focused' }));
+    expect(screen.getAllByRole('tooltip')[1].style.top).toBe('126px');
   });
 });
 

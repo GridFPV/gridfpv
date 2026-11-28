@@ -2164,12 +2164,16 @@ code of §13.13.
     - Anyone may ask a server whether sign-up is open (`GET /api/server`), so the sign-in
       page can say the right thing.
     - Someone who signs up lands on their account page, where the profile is.
-    - The page has four parts, each with its own row of pages, so using it and setting
-      it up are apart: **Events** (events, clubs, my results), **Account** (profile,
-      clubs, sign-in), **Club** for those who run one (members, invites, pilots, events,
-      link tokens, settings), and **Server** for owners (clubs, sign-in, email).
-      Addresses use whole words: `#/club/<word>`, `#/event/<club>/<event>`,
-      `#/manage/<word>/<page>`, `#/admin/<page>`.
+    - The page has two areas, so using it and running it are apart. The **pilot area** is
+      what everyone sees: **Events** (events, clubs, my results) and **Account** (profile,
+      clubs, sign-in). The **admin area** has **Club** for those who run one (members,
+      invites, pilots, events, link tokens, settings) and **Server** for owners (clubs,
+      sign-in, email). Someone who runs a club or the server has a Pilot / Admin switch
+      at the top to go between the two, and the admin area has a bar of its own colour.
+      It is one sign-in for both. Signing in opens the pilot area.
+      Addresses use whole words: `#/club/<word>`, `#/event/<club>/<event>`. Every
+      address of the admin area starts `#/admin`: `#/admin/club/<word>/<page>`,
+      `#/admin/server/<page>`.
     - The email account a server sends from can be set by an owner on the server's Email
       page, as well as in the environment. What is set on the page wins, is used at once,
       and is kept with the server's other settings, in a file only its owner can read.

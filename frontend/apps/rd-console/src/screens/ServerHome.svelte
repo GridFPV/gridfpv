@@ -203,6 +203,7 @@
       place.kind === 'club' ||
       place.kind === 'manage' ||
       place.kind === 'admin' ||
+      place.kind === 'admin-home' ||
       place.kind === 'invite' ||
       place.kind === 'reconnect' ||
       place.kind === 'results'
@@ -297,7 +298,7 @@
   const lookedAfter = $derived(
     lookedAfterClubs(account ?? undefined, clubs?.map((entry) => entry.club) ?? [])
   );
-  /** The club an address under `#/manage/` names: by its friendly word, or else its id. */
+  /** The club an address under `#/admin/club/` names: by its friendly word, or else its id. */
   const managedWord = $derived(place.kind === 'manage' ? place.club : undefined);
   const managedClub = $derived(
     managedWord === undefined
@@ -321,6 +322,24 @@
     const now = clubs.find((entry) => entry.club.id === before.id)?.club;
     if (now?.word && now.word !== place.club) {
       location.replace(formatServerHash({ kind: 'manage', club: now.word, page: place.page }));
+    }
+  });
+
+  // `#/admin` is the way in to the admin area. It goes on to the first thing the person
+  // runs: a club they look after, or else the server itself.
+  $effect(() => {
+    if (place.kind !== 'admin-home' || !account || clubs === undefined) return;
+    const first = lookedAfter[0];
+    if (first) {
+      location.replace(
+        formatServerHash({
+          kind: 'manage',
+          club: first.club.word ?? first.club.id,
+          page: first.runs ? 'members' : 'pilots'
+        })
+      );
+    } else if (account.owner) {
+      location.replace(formatServerHash({ kind: 'admin', page: 'clubs' }));
     }
   });
 
@@ -811,6 +830,18 @@
       {@render signInFirst()}
     {:else if account && clubs !== undefined}
       <Card elevation="sm"><p class="event">This club is not here</p></Card>
+    {/if}
+  </Page>
+{:else if place.kind === 'admin-home'}
+  <Page title="Admin">
+    {#if account === null}
+      {@render signInFirst()}
+    {:else if account && clubs !== undefined && lookedAfter.length === 0 && !account.owner}
+      <Card elevation="sm">
+        <p data-testid="admin-nothing">You do not run a club or this server.</p>
+      </Card>
+    {:else}
+      <p class="muted" role="status">Loading…</p>
     {/if}
   </Page>
 {:else if place.kind === 'results'}

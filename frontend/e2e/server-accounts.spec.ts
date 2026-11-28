@@ -128,8 +128,8 @@ test('an owner, a director and a pilot each get their account by invite and thei
   await openServerPage(ace, 'Clubs');
   await expect(ace.getByRole('list', { name: 'Your clubs' })).toContainText('Recon FPV');
   await expect(ace.getByRole('list', { name: 'Your clubs' })).toContainText('Pilot');
-  await expect(ace.getByRole('link', { name: 'Club', exact: true })).toHaveCount(0);
-  await ace.goto(`${server.baseUrl}/#/manage/club`);
+  await expect(ace.getByRole('navigation', { name: 'Area' })).toHaveCount(0);
+  await ace.goto(`${server.baseUrl}/#/admin/club/club`);
   await expect(
     ace.getByText('Only those who look after this club can open this page.')
   ).toBeVisible();

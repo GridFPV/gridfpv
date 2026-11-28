@@ -2,16 +2,22 @@
   /**
    * ServerNav — what every page of a remote server sits under (docs/primitives.md §13). It
    * is the Director's own nav, for a server: the brand, a switch between the parts of the
-   * page, and the row of pages of the part that is showing.
+   * area, and the row of pages of the part that is showing.
    *
-   * - **Events** is for everyone: the events, the clubs, and a signed-in pilot's results.
-   * - **Account** is the signed-in person's own settings.
+   * The page has two areas, kept apart. Someone who runs a club or the server has a
+   * Pilot / Admin switch at the end of the bar to go between them. Nobody else sees it.
+   *
+   * The **pilot area** is what everyone sees:
+   * - **Events**: the events, the clubs, and a signed-in pilot's results.
+   * - **Account**: the signed-in person's own settings.
+   *
+   * The **admin area** looks different on purpose, so it is plain which one is open:
    * - **Club** is for those who run a club: its members, invites, pilots, events, link
    *   tokens and settings. With more than one club, the page itself has a box to pick which.
    * - **Server** is for an owner of the server: its clubs, how people sign in, and email.
    *
    * A part someone has no say in is not shown. Using a thing and setting it up are kept
-   * apart: nothing under Events changes a setting.
+   * apart: nothing in the pilot area runs a club or the server.
    *
    * Everything is a plain link (`#/…`), so middle-click, copy-link and the back button work.
    */
@@ -19,6 +25,7 @@
   import Brand from '../Brand.svelte';
   import {
     formatServerHash,
+    modeOfPlace,
     sideOfPlace,
     type ServerPlace,
     type ServerSide
@@ -126,6 +133,8 @@
     }
   });
 
+  const mode = $derived(modeOfPlace(place));
+
   const clubHref = $derived(
     managed
       ? formatServerHash({
@@ -135,68 +144,136 @@
         })
       : '#/'
   );
+  const serverHref = formatServerHash({ kind: 'admin', page: 'clubs' });
+  /** Whether the signed-in person runs anything: a club, or the server. */
+  const runsSomething = $derived(!!account && (!!managed || account.owner));
+  /** Where the admin area opens: the club they run, or else the server. */
+  const adminHref = $derived(managed ? clubHref : serverHref);
 </script>
 
-<header class="nav">
-  <Brand sub="Server" onclick={() => (location.hash = '#/')} />
-  <nav class="sides" aria-label="Parts of this server">
-    <a
-      href="#/"
-      class:active={side === 'events'}
-      aria-current={side === 'events' ? 'true' : undefined}
-      title="Events, clubs and results">Events</a
-    >
-    {#if account}
-      <a
-        href={formatServerHash({ kind: 'account', page: 'profile' })}
-        class:active={side === 'account'}
-        aria-current={side === 'account' ? 'true' : undefined}
-        title="Your own profile, clubs and sign-in">Account</a
-      >
-    {/if}
-    {#if account && managed}
-      <a
-        href={clubHref}
-        class:active={side === 'club'}
-        aria-current={side === 'club' ? 'true' : undefined}
-        title="Run {managed.club.name}">Club</a
-      >
-    {/if}
-    {#if account?.owner}
-      <a
-        href={formatServerHash({ kind: 'admin', page: 'clubs' })}
-        class:active={side === 'server'}
-        aria-current={side === 'server' ? 'true' : undefined}
-        title="Run this server: clubs, sign-in and email">Server</a
-      >
-    {/if}
-  </nav>
-  <nav class="pages" aria-label="Pages">
-    {#each pages as page (page.key)}
-      <a
-        href={formatServerHash(page.to)}
-        class:active={current === page.key}
-        aria-current={current === page.key ? 'page' : undefined}>{page.label}</a
-      >
-    {/each}
-  </nav>
-  <div class="end">
-    {#if account}
-      <a
-        class="who"
-        href={formatServerHash({ kind: 'account', page: 'profile' })}
-        data-testid="server-who"
-        title="Your account">{account.name}</a
-      >
-    {:else if account === null && canSignIn}
-      <a class="sign-in" href={formatServerHash({ kind: 'sign-in' })} data-testid="server-sign-in"
-        >Sign in</a
-      >
-    {/if}
-  </div>
-</header>
+<div class="bar" data-mode={mode} data-testid="server-bar">
+  <header class="nav">
+    <Brand
+      sub={mode === 'admin' ? 'Admin' : 'Server'}
+      onclick={() => (location.hash = mode === 'admin' ? adminHref : '#/')}
+    />
+    <nav class="sides" aria-label="Parts of this server">
+      {#if mode === 'admin'}
+        {#if account && managed}
+          <a
+            href={clubHref}
+            class:active={side === 'club'}
+            aria-current={side === 'club' ? 'true' : undefined}
+            title="Run {managed.club.name}">Club</a
+          >
+        {/if}
+        {#if account?.owner}
+          <a
+            href={serverHref}
+            class:active={side === 'server'}
+            aria-current={side === 'server' ? 'true' : undefined}
+            title="Run this server: clubs, sign-in and email">Server</a
+          >
+        {/if}
+      {:else}
+        <a
+          href="#/"
+          class:active={side === 'events'}
+          aria-current={side === 'events' ? 'true' : undefined}
+          title="Events, clubs and results">Events</a
+        >
+        {#if account}
+          <a
+            href={formatServerHash({ kind: 'account', page: 'profile' })}
+            class:active={side === 'account'}
+            aria-current={side === 'account' ? 'true' : undefined}
+            title="Your own profile, clubs and sign-in">Account</a
+          >
+        {/if}
+      {/if}
+    </nav>
+    <nav class="pages" aria-label="Pages">
+      {#each pages as page (page.key)}
+        <a
+          href={formatServerHash(page.to)}
+          class:active={current === page.key}
+          aria-current={current === page.key ? 'page' : undefined}>{page.label}</a
+        >
+      {/each}
+    </nav>
+    <div class="end">
+      {#if runsSomething}
+        <nav class="mode" aria-label="Area" data-testid="server-mode">
+          <a
+            href="#/"
+            class:active={mode === 'pilot'}
+            aria-current={mode === 'pilot' ? 'true' : undefined}
+            title="What everyone sees: events, clubs and your account">Pilot</a
+          >
+          <a
+            href={adminHref}
+            class:active={mode === 'admin'}
+            aria-current={mode === 'admin' ? 'true' : undefined}
+            title={account?.owner ? 'Run your clubs and this server' : 'Run your club'}>Admin</a
+          >
+        </nav>
+      {/if}
+      {#if account}
+        <a
+          class="who"
+          href={formatServerHash({ kind: 'account', page: 'profile' })}
+          data-testid="server-who"
+          title="Your account">{account.name}</a
+        >
+      {:else if account === null && canSignIn}
+        <a class="sign-in" href={formatServerHash({ kind: 'sign-in' })} data-testid="server-sign-in"
+          >Sign in</a
+        >
+      {/if}
+    </div>
+  </header>
+</div>
 
 <style>
+  /* The admin area has a bar of its own colour, so it is plain which area is open. */
+  .bar[data-mode='admin'] {
+    padding-bottom: var(--gf-space-3);
+    background: var(--gf-surface-alt);
+    border-bottom: 2px solid var(--gf-warn);
+  }
+  .bar[data-mode='admin'] .sides a.active,
+  .bar[data-mode='admin'] .pages a.active {
+    background: var(--gf-warn-soft);
+  }
+  .bar[data-mode='admin'] .sides a.active {
+    box-shadow: inset 0 -2px 0 var(--gf-warn);
+  }
+  /* Pilot / Admin: the two halves of one small switch. */
+  .mode {
+    display: flex;
+    padding: 2px;
+    border: 1px solid var(--gf-border);
+    border-radius: 999px;
+  }
+  .mode a {
+    padding: var(--gf-space-1) var(--gf-space-3);
+    border-radius: 999px;
+    text-decoration: none;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .mode a:hover {
+    color: var(--gf-text);
+  }
+  .mode a.active {
+    color: var(--gf-accent-contrast);
+    background: var(--gf-accent);
+  }
+  .bar[data-mode='admin'] .mode a.active {
+    color: var(--gf-neutral-0);
+    background: var(--gf-warn);
+  }
   .nav {
     display: flex;
     align-items: center;

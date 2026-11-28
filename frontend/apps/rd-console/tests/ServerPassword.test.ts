@@ -398,13 +398,13 @@ describe('the owner switching passwords on and off', () => {
     }) as HTMLInputElement;
 
   it('is not shown to someone who is not an owner', async () => {
-    open('#/admin/sign-in', fakeServer({ account: ACE }));
+    open('#/admin/server/sign-in', fakeServer({ account: ACE }));
     await screen.findByTestId('server-who');
     expect(screen.queryByTestId('password-setting')).toBeNull();
   });
 
   it('starts off, and is switched on with one press', async () => {
-    const { people, server } = open('#/admin/sign-in', fakeServer({ account: OWNER }));
+    const { people, server } = open('#/admin/server/sign-in', fakeServer({ account: OWNER }));
     const card = await setting();
     await waitFor(() =>
       expect(within(card).getByTestId('password-state')).toHaveTextContent('Off')
@@ -420,7 +420,7 @@ describe('the owner switching passwords on and off', () => {
 
   it('is switched off only after the owner is told who is locked out', async () => {
     const { people, server } = open(
-      '#/admin/sign-in',
+      '#/admin/server/sign-in',
       fakeServer({ account: OWNER, passwordOn: true })
     );
     const card = await setting();
@@ -447,7 +447,10 @@ describe('the owner switching passwords on and off', () => {
       ...OWNER,
       sign_ins: [{ provider: 'password', subject: 'oz', label: 'oz' }]
     };
-    const { server } = open('#/admin/sign-in', fakeServer({ account: owner, passwordOn: true }));
+    const { server } = open(
+      '#/admin/server/sign-in',
+      fakeServer({ account: owner, passwordOn: true })
+    );
     const card = await setting();
     await waitFor(() => expect(flip(card).checked).toBe(true));
     await fireEvent.click(flip(card));

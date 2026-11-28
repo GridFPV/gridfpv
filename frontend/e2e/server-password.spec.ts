@@ -68,8 +68,19 @@ test('a server with no sign-in service runs on usernames and passwords alone', a
   await fill(ryan, 'Ryan', OWNER_PW, true);
   await ryan.getByRole('button', { name: 'Create account' }).click();
   await expect(ryan.getByTestId('server-who')).toHaveText('Ryan');
-  // An owner has the Server part.
+  // Signing in opens the pilot area. An owner has the switch to the admin area, which
+  // looks different and holds the Server part. The pilot area holds none of it.
+  const area = ryan.getByRole('navigation', { name: 'Area' });
+  await expect(area.getByRole('link', { name: 'Pilot' })).toHaveAttribute('aria-current', 'true');
+  await expect(ryan.getByTestId('server-bar')).toHaveAttribute('data-mode', 'pilot');
+  await expect(ryan.getByRole('link', { name: 'Server', exact: true })).toHaveCount(0);
+  await area.getByRole('link', { name: 'Admin' }).click();
+  await expect(ryan).toHaveURL(/#\/admin\//);
+  await expect(ryan.getByTestId('server-bar')).toHaveAttribute('data-mode', 'admin');
   await expect(ryan.getByRole('link', { name: 'Server', exact: true })).toBeVisible();
+  await expect(ryan.getByRole('link', { name: 'Account', exact: true })).toHaveCount(0);
+  await area.getByRole('link', { name: 'Pilot' }).click();
+  await expect(ryan).toHaveURL(/#\/$/);
   await ryan.getByTestId('server-who').click();
   await expect(ryan.getByText('Server owner')).toBeVisible();
   await openServerPage(ryan, 'Sign-in');
@@ -138,7 +149,7 @@ test('a server with no sign-in service runs on usernames and passwords alone', a
   await pia.getByRole('button', { name: 'Create account' }).click();
   await expect(pia.getByTestId('account-name')).toHaveText('pia');
   // She is in no club, and running the server is not hers.
-  await expect(pia.getByRole('link', { name: 'Server', exact: true })).toHaveCount(0);
+  await expect(pia.getByRole('navigation', { name: 'Area' })).toHaveCount(0);
   await openServerPage(pia, 'Clubs');
   await expect(pia.getByText('You are not in a club yet.')).toBeVisible();
   // The owner's password was not changed by the try at their username.

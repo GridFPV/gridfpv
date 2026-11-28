@@ -78,20 +78,22 @@ describe('a club address', () => {
 
 describe("the owner's list of clubs", () => {
   it('is on the Server part, for an owner, with each club and its address', async () => {
-    open('#/admin', fakeServer({ account: OZ }));
+    open('#/admin/server', fakeServer({ account: OZ }));
     const card = await screen.findByTestId('server-clubs');
     await within(card).findAllByTestId('owned-club');
     expect(names()).toEqual(['North FPV', 'South FPV']);
     expect(within(owned()[0]).getByTestId('club-address')).toHaveTextContent(
       `${location.origin}/#/club/north-fpv`
     );
-    expect(within(owned()[0]).getByRole('link').getAttribute('href')).toBe('#/manage/north-fpv');
+    expect(within(owned()[0]).getByRole('link').getAttribute('href')).toBe(
+      '#/admin/club/north-fpv'
+    );
     // Never the club's id as words on the page.
     expect(card.textContent).not.toMatch(/\bnorth\b(?!-)/);
   });
 
   it('is not shown to anyone who is not an owner', async () => {
-    const { people } = open('#/admin', fakeServer({ account: ACE }));
+    const { people } = open('#/admin/server', fakeServer({ account: ACE }));
     await screen.findByTestId('server-who');
     expect(screen.queryByTestId('server-clubs')).toBeNull();
     expect(screen.queryByRole('link', { name: 'Server' })).toBeNull();
@@ -99,7 +101,7 @@ describe("the owner's list of clubs", () => {
   });
 
   it('makes a club, which then shows in the list with its own address', async () => {
-    const { people, server } = open('#/admin', fakeServer({ account: OZ }));
+    const { people, server } = open('#/admin/server', fakeServer({ account: OZ }));
     const card = await screen.findByTestId('server-clubs');
     await within(card).findAllByTestId('owned-club');
     const make = within(card).getByRole('button', { name: 'Make the club' });
@@ -116,7 +118,7 @@ describe("the owner's list of clubs", () => {
   });
 
   it("shows the server's words when a club cannot be made, and keeps what was typed", async () => {
-    const { people } = open('#/admin', fakeServer({ account: OZ }));
+    const { people } = open('#/admin/server', fakeServer({ account: OZ }));
     const card = await screen.findByTestId('server-clubs');
     await within(card).findAllByTestId('owned-club');
     people.makeClub.mockRejectedValueOnce(new Error("A club's name is 80 characters at most."));
@@ -130,7 +132,7 @@ describe("the owner's list of clubs", () => {
   });
 
   it('asks before archiving, says what it does, and does nothing on Cancel', async () => {
-    const { people } = open('#/admin', fakeServer({ account: OZ }));
+    const { people } = open('#/admin/server', fakeServer({ account: OZ }));
     await screen.findAllByTestId('owned-club');
     await fireEvent.click(screen.getByRole('button', { name: 'Archive North FPV' }));
     const sure = await screen.findByRole('dialog');
@@ -144,7 +146,7 @@ describe("the owner's list of clubs", () => {
   });
 
   it('archives a club, marks it, and brings it back', async () => {
-    const { people, server } = open('#/admin', fakeServer({ account: OZ }));
+    const { people, server } = open('#/admin/server', fakeServer({ account: OZ }));
     await screen.findAllByTestId('owned-club');
     await fireEvent.click(screen.getByRole('button', { name: 'Archive North FPV' }));
     await fireEvent.click(
@@ -200,7 +202,7 @@ describe('an archived club', () => {
   });
 
   it('says so on its own page, for the owner who can bring it back', async () => {
-    open('#/manage/north', archived(OZ));
+    open('#/admin/club/north', archived(OZ));
     expect(await screen.findByTestId('club-archived')).toHaveTextContent(
       'Nothing in it can be changed'
     );
@@ -236,7 +238,7 @@ describe("a club's friendly address", () => {
   });
 
   it("is shown on the club's own page to those who run it, to hand out", async () => {
-    open('#/manage/north/settings', fakeServer({ account: ACE }));
+    open('#/admin/club/north/settings', fakeServer({ account: ACE }));
     expect(await screen.findByTestId('club-own-address')).toHaveTextContent(
       `${location.origin}/#/club/north-fpv`
     );

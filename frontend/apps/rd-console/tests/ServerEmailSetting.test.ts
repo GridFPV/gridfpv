@@ -21,7 +21,7 @@ afterEach(() => {
 
 const OWNER: MyAccount = { ...ACE, id: 'acct_oz', name: 'Oz', owner: true, clubs: [] };
 
-function open(server: FakeServer, hash = '#/admin/email') {
+function open(server: FakeServer, hash = '#/admin/server/email') {
   location.hash = hash;
   const people = fakePeople(server);
   render(ServerHome, {
@@ -255,7 +255,7 @@ describe("the server's email settings", () => {
     go('#/account/sign-in');
     await screen.findByRole('list', { name: 'How you sign in' });
     expect(screen.queryByTestId('account-email')).toBeNull();
-    go('#/admin/email');
+    go('#/admin/server/email');
     await card();
     await waitFor(() => expect(state()).toHaveTextContent('Off'));
     await type('Server', 'smtp.example.org');
@@ -268,7 +268,7 @@ describe("the server's email settings", () => {
 
   it('says so when the settings cannot be read', async () => {
     const server = fakeServer({ account: OWNER });
-    location.hash = '#/admin/email';
+    location.hash = '#/admin/server/email';
     const people = fakePeople(server);
     people.mailSettings.mockRejectedValue(new Error('The server is not answering.'));
     render(ServerHome, {
