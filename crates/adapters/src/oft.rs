@@ -79,6 +79,35 @@ pub struct OftInfo {
     pub nodes: Vec<OftNode>,
     #[serde(default)]
     pub calibrated: bool,
+    /// Where the Timer's own page is (spec v0.12): absolute, or relative to the address the
+    /// Timer was reached at. Absent: the Timer has no such page. See [`manage_page`].
+    #[serde(default)]
+    pub manage_url: Option<String>,
+}
+
+/// The full address of a Timer's own page, from the `manage_url` in its `/info` and the
+/// `host:port` Grid reached it at (spec §6.3). `None` when the Timer gave none, or gave
+/// something that is not a web address: only `http` and `https` are let through, because
+/// a console shows this as a link.
+pub fn manage_page(address: &str, manage_url: Option<&str>) -> Option<String> {
+    let url = manage_url?.trim();
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Some(url.to_owned());
+    }
+    if url.starts_with("//") {
+        return Some(format!("http:{url}"));
+    }
+    // Anything else with a scheme ("javascript:", "file:") is not a page to link to.
+    let first = url.split(['/', '?', '#']).next().unwrap_or("");
+    if first.contains(':') {
+        return None;
+    }
+    let path = url.strip_prefix('/').unwrap_or(url);
+    Some(format!("http://{address}/{path}"))
 }
 
 /// Grid's unit for a Node's levels. Grid keeps levels as whole numbers exactly as sent, so
@@ -340,6 +369,11 @@ pub enum OftMessage {
         /// change (spec v0.9). It starts again when the Timer does. Absent on an older Timer.
         #[serde(default)]
         config_rev: Option<u32>,
+        /// What is wrong with the Timer, as short names (spec v0.12, §6.3): `node_missing`,
+        /// `safe_mode`, `crashed`, or a name Grid does not know. Empty: nothing is. Absent
+        /// on an older Timer, which is not the same as empty.
+        #[serde(default)]
+        problems: Option<Vec<String>>,
     },
     /// Who may change the Timer (spec v0.9, §6.6). Sent after `hello` and whenever it
     /// changes. See [`ControlStanding::read`].
@@ -1186,7 +1220,10 @@ mod tests {
             "drift_ppm":null,"node_connected":true,"clients":1,
             "seats":[{"seat":0,"node":"00aabbccddee","rate_hz":1000,"rssi":-880,
                       "floor":-900,"enter":-750,"exit":-800,"crossing":false}]}"#;
-        let OftMessage::Status { seats, config_rev } = OftMessage::parse(frame).unwrap() else {
+        let OftMessage::Status {
+            seats, config_rev, ..
+        } = OftMessage::parse(frame).unwrap()
+        else {
             panic!("expected a status");
         };
         // A Timer older than v0.9 has no `config_rev`.
@@ -1319,6 +1356,77 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&config).unwrap(),
             serde_json::from_str::<serde_json::Value>(body).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_v0_12_timer_says_where_its_own_page_is() {
+        // As the reference Timers send it: relative to the address they were reached at.
+        let info: OftInfo =
+            serde_json::from_str(r#"{"nodes":[],"calibrated":false,"manage_url":"/"}"#).unwrap();
+        assert_eq!(info.manage_url.as_deref(), Some("/"));
+        let page = |url| manage_page("192.168.1.50:7270", Some(url));
+        assert_eq!(page("/").as_deref(), Some("http://192.168.1.50:7270/"));
+        assert_eq!(page("").as_deref(), Some("http://192.168.1.50:7270/"));
+        assert_eq!(
+            page("/manage?tab=net").as_deref(),
+            Some("http://192.168.1.50:7270/manage?tab=net")
+        );
+        assert_eq!(
+            page("timer.html").as_deref(),
+            Some("http://192.168.1.50:7270/timer.html")
+        );
+        // A path may have a colon after its first part.
+        assert_eq!(
+            page("page/a:b").as_deref(),
+            Some("http://192.168.1.50:7270/page/a:b")
+        );
+        // Absolute: taken as it is, on whatever host and port it names.
+        assert_eq!(
+            page("http://192.168.1.50/").as_deref(),
+            Some("http://192.168.1.50/")
+        );
+        assert_eq!(
+            page("HTTPS://timer.example/x").as_deref(),
+            Some("HTTPS://timer.example/x")
+        );
+        assert_eq!(
+            page("//timer.local/").as_deref(),
+            Some("http://timer.local/")
+        );
+        // Not a web page: no link is made of it.
+        assert_eq!(page("javascript:alert(1)"), None);
+        assert_eq!(page("JavaScript:alert(1)"), None);
+        assert_eq!(page("file:///etc/passwd"), None);
+        assert_eq!(page("data:text/html,x"), None);
+        assert_eq!(page("/a b"), None);
+        assert_eq!(page("java\nscript:x"), None);
+        // An older Timer, or one with no page, says nothing.
+        let info: OftInfo = serde_json::from_str(r#"{"nodes":[]}"#).unwrap();
+        assert_eq!(info.manage_url, None);
+        assert_eq!(manage_page("192.168.1.50:7270", None), None);
+    }
+
+    #[test]
+    fn a_v0_12_status_says_what_is_wrong_and_an_older_one_says_nothing() {
+        let problems = |frame: &str| match OftMessage::parse(frame).unwrap() {
+            OftMessage::Status { problems, .. } => problems,
+            other => panic!("expected a status, got {other:?}"),
+        };
+        assert_eq!(
+            problems(r#"{"type":"status","problems":["node_missing","crashed"],"seats":[]}"#),
+            Some(vec!["node_missing".to_owned(), "crashed".to_owned()])
+        );
+        // Nothing wrong is an empty list. No list at all is a Timer from before v0.12.
+        assert_eq!(
+            problems(r#"{"type":"status","problems":[],"seats":[]}"#),
+            Some(vec![])
+        );
+        assert_eq!(problems(r#"{"type":"status","seats":[]}"#), None);
+        // A name Grid does not know is kept as it stands.
+        assert_eq!(
+            problems(r#"{"type":"status","problems":["low_voltage"]}"#),
+            Some(vec!["low_voltage".to_owned()])
         );
     }
 

@@ -445,7 +445,8 @@ describe('TimersPage', () => {
         connected: true,
         seats: ['0'],
         control: { holder: 'Other', name: 'RotorHazard pi-timer' },
-        control_name: 'GridFPV race-laptop'
+        control_name: 'GridFPV race-laptop',
+        manage_url: 'http://10.0.0.5:7270/manage'
       }
     };
     const ours: TimerView = {
@@ -464,10 +465,94 @@ describe('TimersPage', () => {
     );
     expect(within(said).getByRole('link', { name: "Open the timer's page" })).toHaveAttribute(
       'href',
-      'http://10.0.0.5:7270/'
+      'http://10.0.0.5:7270/manage'
     );
     // A timer Grid controls says nothing about it.
     const other = screen.getByRole('listitem', { name: 'Split' });
     expect(within(other).queryByTestId('timer-control')).toBeNull();
+  });
+
+  it('says where control is given when the timer names no page, without a link', async () => {
+    const held: TimerView = {
+      timer: { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' },
+      status: { connected: true, seats: ['0'], control: { holder: 'Other', name: 'RotorHazard' } }
+    };
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [held])
+    });
+    render(TimersPage, { session });
+    const row = await screen.findByRole('listitem', { name: 'Gate' });
+    const said = within(row).getByTestId('timer-control');
+    expect(said).toHaveTextContent(
+      "“RotorHazard” has control of Gate. Grid cannot change this timer. Give control to Grid on the timer's own page."
+    );
+    expect(within(row).queryByRole('link')).toBeNull();
+  });
+
+  it('links to the page the timer names, and has no link for a timer that names none', async () => {
+    const paged: TimerView = {
+      timer: { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' },
+      status: { connected: true, seats: ['0'], manage_url: 'http://10.0.0.5:7270/' }
+    };
+    const plain: TimerView = {
+      timer: { id: 'split-a1b2', name: 'Split', kind: 'Oft', address: '10.0.0.6:7270' },
+      status: { connected: true, seats: ['0'] }
+    };
+    // Not connected, but its page was read before the link dropped: still offered.
+    const down: TimerView = {
+      timer: { id: 'far-c3d4', name: 'Far', kind: 'Oft', address: '10.0.0.7:7270' },
+      status: { connected: false, seats: [], manage_url: 'http://10.0.0.7:7270/' }
+    };
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [paged, plain, down])
+    });
+    render(TimersPage, { session });
+    const row = await screen.findByRole('listitem', { name: 'Gate' });
+    const link = within(row).getByRole('link', { name: 'Timer page' });
+    expect(link).toHaveAttribute('href', 'http://10.0.0.5:7270/');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(within(screen.getByRole('listitem', { name: 'Split' })).queryByRole('link')).toBeNull();
+    expect(
+      within(screen.getByRole('listitem', { name: 'Far' })).getByRole('link', {
+        name: 'Timer page'
+      })
+    ).toHaveAttribute('href', 'http://10.0.0.7:7270/');
+  });
+
+  it('says what a timer reports is wrong with it, in words', async () => {
+    const sick: TimerView = {
+      timer: { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' },
+      status: {
+        connected: true,
+        seats: ['0'],
+        timer_problems: ['node_missing', 'safe_mode', 'crashed', 'low_voltage']
+      }
+    };
+    const well: TimerView = {
+      timer: { id: 'split-a1b2', name: 'Split', kind: 'Oft', address: '10.0.0.6:7270' },
+      status: { connected: true, seats: ['0'], timer_problems: [] }
+    };
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [sick, well])
+    });
+    render(TimersPage, { session });
+    const row = await screen.findByRole('listitem', { name: 'Gate' });
+    const said = within(row)
+      .getAllByTestId('timer-reported')
+      .map((p) => p.textContent?.trim());
+    expect(said).toEqual([
+      'A receiver on Gate is not answering.',
+      'Gate started in safe mode.',
+      'Gate restarted after a failure.',
+      'Gate reports a problem: low_voltage.'
+    ]);
+    // The names the timer uses for the ones Grid knows never reach the screen.
+    expect(row.textContent).not.toMatch(/node_missing|safe_mode|crashed/);
+    expect(row.textContent).not.toContain('gate-x1y2');
+    const other = screen.getByRole('listitem', { name: 'Split' });
+    expect(within(other).queryByTestId('timer-reported')).toBeNull();
   });
 });

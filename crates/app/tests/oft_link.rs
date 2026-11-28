@@ -44,6 +44,11 @@ struct Fake {
     control: Arc<Mutex<FakeControl>>,
     /// Counts the connections, so each claim knows which one has it.
     connections: Arc<Mutex<u64>>,
+    /// The `manage_url` at `/info` (spec v0.12). `None`: left out, as an older timer does.
+    manage_url: Arc<Mutex<Option<String>>>,
+    /// The `problems` in its `status` (spec v0.12). `None`: left out, as an older timer
+    /// does. Set, the fake sends `status`.
+    problems: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 /// One standing claim on the fake.
@@ -236,10 +241,14 @@ async fn write_config(
 }
 
 async fn info(State(fake): State<Fake>) -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({
+    let mut info = serde_json::json!({
         "id": "oft-fake", "boot_id": "b001", "proto": 1, "calibrated": false,
         "nodes": fake.nodes.lock().unwrap().clone(),
-    }))
+    });
+    if let Some(url) = fake.manage_url.lock().unwrap().clone() {
+        info["manage_url"] = url.into();
+    }
+    axum::Json(info)
 }
 
 async fn stream(State(fake): State<Fake>, upgrade: WebSocketUpgrade) -> Response {
@@ -329,7 +338,8 @@ async fn serve_stream(
                     continue;
                 }
                 let status_node = fake.status_node.lock().unwrap().clone();
-                if status_node.is_some() || control_said.is_some() {
+                let problems = fake.problems.lock().unwrap().clone();
+                if status_node.is_some() || control_said.is_some() || problems.is_some() {
                     let mut status = serde_json::json!({
                         "type": "status", "uptime_s": 1,
                         "seats": [{"seat": 0, "rate_hz": 500, "rssi": 410,
@@ -337,6 +347,9 @@ async fn serve_stream(
                     });
                     if let Some(node) = status_node {
                         status["seats"][0]["node"] = node.into();
+                    }
+                    if let Some(problems) = problems {
+                        status["problems"] = problems.into();
                     }
                     if control_said.is_some() {
                         let control = fake.control.lock().unwrap();
@@ -461,6 +474,8 @@ async fn fake_timer() -> (Fake, SocketAddr) {
             ..FakeControl::default()
         })),
         connections: Arc::default(),
+        manage_url: Arc::default(),
+        problems: Arc::default(),
     };
     let app = Router::new()
         .route("/oft/v1/stream", get(stream))
@@ -806,6 +821,118 @@ async fn a_receiver_that_reports_millivolts_after_the_hello_is_logged_in_millivo
     })
     .await;
     assert_eq!(&chunk.levels[..3], [-900, -900, -880]);
+}
+
+// ── The timer's own page, and what it says is wrong (OFT spec v0.12, §6.3) ─────
+
+/// A fake timer in a directory, with the link to it running.
+async fn linked_timer(before: impl FnOnce(&Fake)) -> (Fake, EventRegistry, SocketAddr) {
+    let (fake, addr) = fake_timer().await;
+    before(&fake);
+    let registry = EventRegistry::new(None).unwrap();
+    registry
+        .timers()
+        .create(&CreateTimerRequest {
+            name: "Gate".into(),
+            kind: TimerKind::Oft,
+            address: addr.to_string(),
+            own_id: None,
+        })
+        .unwrap();
+    (fake, registry, addr)
+}
+
+fn now(registry: &EventRegistry) -> gridfpv_server::timers::TimerStatus {
+    registry.timers().list().remove(0).status
+}
+
+#[tokio::test]
+async fn the_timers_own_page_is_read_as_soon_as_it_connects() {
+    let (fake, registry, addr) =
+        linked_timer(|fake| *fake.manage_url.lock().unwrap() = Some("/".into())).await;
+    let _links = gridfpv_app::oft::spawn(registry.clone());
+    // Well inside the fifteen seconds between the later reads of `/info`.
+    let page = tokio::time::timeout(
+        Duration::from_secs(5),
+        eventually("the timer's page to be known", || now(&registry).manage_url),
+    )
+    .await
+    .expect("the page is read at once, not at the next slow turn");
+    assert_eq!(page, format!("http://{addr}/"));
+    // The link dropping does not lose it: a timer in trouble is when the page is wanted.
+    *fake.hang_up.lock().unwrap() = true;
+    eventually("the link to drop and come back", || {
+        (fake.subscriptions.lock().unwrap().len() >= 2 && now(&registry).connected).then_some(())
+    })
+    .await;
+    assert_eq!(now(&registry).manage_url, Some(format!("http://{addr}/")));
+}
+
+#[tokio::test]
+async fn a_timer_with_no_page_of_its_own_has_no_link() {
+    let (fake, registry, _) = linked_timer(|_| {}).await;
+    let _links = gridfpv_app::oft::spawn(registry.clone());
+    eventually("the timer to connect", || {
+        now(&registry).connected.then_some(())
+    })
+    .await;
+    // Give the first read of `/info` time to land: it must leave nothing.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(now(&registry).manage_url, None);
+    assert!(now(&registry).timer_problems.is_empty());
+    drop(fake);
+}
+
+#[tokio::test]
+async fn what_the_timer_says_is_wrong_is_on_its_status_and_goes_when_it_does() {
+    let (fake, registry, _) = linked_timer(|fake| {
+        *fake.problems.lock().unwrap() = Some(vec!["node_missing".into(), "low_voltage".into()]);
+    })
+    .await;
+    let _links = gridfpv_app::oft::spawn(registry.clone());
+    // Names Grid knows and names it does not, in the timer's order.
+    eventually("the timer's problems to show", || {
+        (now(&registry).timer_problems == ["node_missing", "low_voltage"]).then_some(())
+    })
+    .await;
+    assert!(now(&registry).connected);
+
+    // The timer's list changes: the status follows.
+    *fake.problems.lock().unwrap() = Some(vec!["crashed".into()]);
+    eventually("the changed problems to show", || {
+        (now(&registry).timer_problems == ["crashed"]).then_some(())
+    })
+    .await;
+
+    // The receiver is back: an empty list clears it.
+    *fake.problems.lock().unwrap() = Some(Vec::new());
+    eventually("the problems to clear", || {
+        now(&registry).timer_problems.is_empty().then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn problems_are_not_kept_across_a_dropped_link() {
+    let (fake, registry, _) = linked_timer(|fake| {
+        *fake.problems.lock().unwrap() = Some(vec!["safe_mode".into()]);
+    })
+    .await;
+    let links = gridfpv_app::oft::spawn(registry.clone());
+    eventually("the timer's problems to show", || {
+        (now(&registry).timer_problems == ["safe_mode"]).then_some(())
+    })
+    .await;
+    // The timer comes back saying nothing is wrong (and sends no `status` to say so: an
+    // older firmware). What it said before the drop must not stand.
+    *fake.problems.lock().unwrap() = None;
+    *fake.hang_up.lock().unwrap() = true;
+    eventually("the link to drop and come back", || {
+        (fake.subscriptions.lock().unwrap().len() >= 2 && now(&registry).connected).then_some(())
+    })
+    .await;
+    assert!(now(&registry).timer_problems.is_empty());
+    links.abort();
 }
 
 // ── Control: one writer at a time (OFT spec v0.9, §6.6) ────────────────────────

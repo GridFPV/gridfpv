@@ -867,6 +867,28 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      - Grid never sends `POST /control`. Only the timer's own page chooses the writer.
      - Tested in CI against the fake timer, which keeps claims the way the spec says, and
        against the real daemon (`oft_live.rs`) with a second program holding control.
+   - **OFT spec v0.12 (2026-11-28): the timer's own page, and what is wrong.** A timer's
+     own management (its network address, wiring pins, firmware, restart) left the
+     protocol. Grid never used those endpoints or the `network`, `pins` and `fw.update`
+     capabilities, so nothing was taken out.
+     - `/info` may carry `manage_url`, the address of the timer's own page.
+       `TimerStatus.manage_url` carries it as a full address. Grid reads `/info` as soon
+       as a timer connects. The Timers page has a **Timer page** link, and the "another
+       program has control" warning links there. Grid no longer guesses that the page is
+       at the timer's address: a timer that names no page gets no link. Only `http` and
+       `https` addresses are made into links.
+     - A timer's `status` carries `problems`, a list of short names.
+       `TimerStatus.timer_problems` carries them, and the console turns `node_missing`,
+       `safe_mode` and `crashed` into words on the Timers page and as warnings on the Run
+       page. A name Grid does not know is shown as the timer wrote it. They are cleared
+       when the link drops. A problem does not block Start: like a timer that is not
+       connected, it is a warning and the director decides.
+     - Grid reads `problems` from the stream's `status` message, which both reference
+       timers send it in. The spec names only `GET /status`; a timer that sent it only
+       there would show no problems in Grid.
+     - Receiver ids changed with Node firmware 0.2.0. Grid keeps a receiver's id only in
+       memory, to know each seat's unit, and learns it again at every connect. Nothing
+       stored names a receiver.
    - **A timer that restarts mid-race:** its clock begins again. The laps either side are
      kept, and the stretch across the restart has no time.
    - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):

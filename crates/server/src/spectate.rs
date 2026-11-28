@@ -248,6 +248,9 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
         control: _,
         control_name: _,
         config_rev: _,
+        timer_problems: _,
+        // Where the timer is on the director's network.
+        manage_url: _,
     } = status;
     TimerView {
         timer: Timer {
@@ -272,6 +275,8 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
             control: None,
             control_name: None,
             config_rev: None,
+            timer_problems: Vec::new(),
+            manage_url: None,
         },
     }
 }

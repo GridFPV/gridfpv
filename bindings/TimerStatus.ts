@@ -71,4 +71,16 @@ control_name?: string,
  * console that shows the settings reads them again when it moves. It starts again
  * when the timer does. Absent on a timer that does not give one.
  */
-config_rev?: number, };
+config_rev?: number, 
+/**
+ * What the timer says is wrong with it, as the short names it gives (OFT spec §6.3):
+ * `node_missing`, `safe_mode`, `crashed`, or a name Grid does not know. A console
+ * turns the ones it knows into words. Empty when the timer knows of nothing wrong,
+ * while it is not connected, and on a timer that does not say.
+ */
+timer_problems?: Array<string>, 
+/**
+ * The address of the timer's own page, where its network, wiring and firmware are
+ * set. Absent until the timer has said, and on a timer with no such page.
+ */
+manage_url?: string, };

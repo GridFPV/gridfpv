@@ -979,7 +979,8 @@ describe('the profile bar', () => {
 describe('a timer another program has control of', () => {
   const HELD = timerView(ID, 'Gate', 2, {
     control: { holder: 'Other', name: 'RotorHazard pi-timer' },
-    control_name: 'GridFPV race-laptop'
+    control_name: 'GridFPV race-laptop',
+    manage_url: 'http://192.168.1.50:7270/'
   });
   const OURS = timerView(ID, 'Gate', 2, {
     control: { holder: 'Grid' },
@@ -997,6 +998,13 @@ describe('a timer another program has control of', () => {
     // The settings were read and are on the page.
     const one = await waitFor(() => seatRow('Seat 1'));
     expect(within(one).getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5658);
+  });
+
+  it('has no link when the timer names no page of its own', async () => {
+    open({}, timerView(ID, 'Gate', 2, { control: { holder: 'Other', name: 'RotorHazard' } }));
+    const banner = await screen.findByTestId('control-trouble');
+    expect(banner).toHaveTextContent("open the timer's own page");
+    expect(within(banner).queryByRole('link')).toBeNull();
   });
 
   it('sends nothing to the timer: Apply and the profile box are off, even with a draft', async () => {

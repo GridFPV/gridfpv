@@ -38,7 +38,7 @@ use futures_util::{SinkExt, StreamExt};
 use gridfpv_adapters::Adapter;
 use gridfpv_adapters::oft::{
     ClockFit, ControlStanding, OftAdapter, OftInfo, OftMessage, SignalBuffer, claim, claim_name,
-    seat_ref,
+    manage_page, seat_ref,
 };
 use gridfpv_events::{AdapterId, Event, SeatRef, SignalThresholds, SignalUnit};
 use gridfpv_server::control::with_event;
@@ -109,6 +109,8 @@ pub(crate) async fn hold(registry: EventRegistry, timer: Timer) {
         registry.timers().report(&timer.id, |status| {
             status.connected = false;
             status.problem = Some(problem);
+            // What the timer said was wrong may not be true by the time it is back.
+            status.timer_problems.clear();
             // Who has control is not known while the timer cannot say. The key is kept:
             // the timer holds Grid's place for ten seconds, and takes writes with it.
             status.control = None;
@@ -321,7 +323,8 @@ impl Link {
         // The timer's list of receivers is read again now and then, off this loop so a slow
         // answer never holds up a crossing.
         let (info_tx, mut info_rx) = tokio::sync::mpsc::channel::<OftInfo>(1);
-        let mut next_info = tokio::time::Instant::now() + INFO_EVERY;
+        // The first read is at once: only `/info` says where the timer's own page is.
+        let mut next_info = tokio::time::Instant::now();
         // Whether this connection has asked for control.
         let mut claimed = false;
         loop {
@@ -340,8 +343,10 @@ impl Link {
                 Some(info) = info_rx.recv() => {
                     adapter.learn_nodes(&info.nodes, info.calibrated);
                     let unit = adapter.shared_unit();
+                    let page = manage_page(&timer.address, info.manage_url.as_deref());
                     self.registry.timers().report(&self.id, |status| {
                         status.level_unit = unit;
+                        status.manage_url = page;
                     });
                 }
                 _ = tokio::time::sleep_until(next_ping) => {
@@ -415,6 +420,8 @@ impl Link {
                                 status.control = None;
                                 status.control_name = control_name;
                                 status.config_rev = config_rev;
+                                // Said again by the timer's next `status`.
+                                status.timer_problems.clear();
                             });
                             // A timer that has just connected (or restarted) may not have
                             // the event's pass window: put it there. A timer with control
@@ -449,8 +456,15 @@ impl Link {
                             );
                             self.claim_refused();
                         }
-                        OftMessage::Status { seats, config_rev } => {
+                        OftMessage::Status { seats, config_rev, problems } => {
                             self.learn_config_rev(*config_rev);
+                            if let Some(problems) = problems {
+                                self.registry.timers().report(&self.id, |status| {
+                                    if status.timer_problems != *problems {
+                                        status.timer_problems.clone_from(problems);
+                                    }
+                                });
+                            }
                             // For whoever is tuning, live. Never logged.
                             let levels = seats
                                 .iter()

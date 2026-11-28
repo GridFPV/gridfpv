@@ -43,6 +43,7 @@
   import {
     clockSentence,
     controlTrouble,
+    timerProblems,
     notAddedYet,
     seatCount,
     seatCountSentence,
@@ -264,15 +265,36 @@
                   {#if control}
                     <p class="problem" data-testid="timer-control">
                       {control.trouble} Grid cannot change this timer.
-                      <a href={control.page} target="_blank" rel="noreferrer"
-                        >Open the timer's page</a
-                      > to give control to Grid.
+                      {#if control.page}
+                        <a href={control.page} target="_blank" rel="noreferrer"
+                          >Open the timer's page</a
+                        > to give control to Grid.
+                      {:else}
+                        Give control to Grid on the timer's own page.
+                      {/if}
                     </p>
                   {/if}
+                  {#each timerProblems(view.timer.name, status) as problem (problem.code)}
+                    <p class="problem" data-testid="timer-reported" title={problem.detail}>
+                      {problem.trouble}
+                    </p>
+                  {/each}
                   <p class="facts">
                     <span data-fact="seats">{seatCountSentence(status)}</span>
                     <span aria-hidden="true">·</span>
                     <span data-fact="clock">{clockSentence(status.clock_error_micros)}</span>
+                    {#if status.manage_url}
+                      <span aria-hidden="true">·</span>
+                      <a
+                        class="page-link"
+                        data-fact="page"
+                        href={status.manage_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Network, wiring and firmware are set on the timer's own page."
+                        >Timer page</a
+                      >
+                    {/if}
                   </p>
                 </div>
                 <div class="actions">
@@ -491,7 +513,8 @@
     font-size: var(--gf-font-size-sm);
     overflow-wrap: anywhere;
   }
-  .problem a {
+  .problem a,
+  .page-link {
     color: var(--gf-accent);
   }
   .facts {
