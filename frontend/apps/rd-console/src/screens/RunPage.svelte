@@ -56,7 +56,7 @@
   } from '../lib/phases.js';
   import { formatHash } from '../lib/route.js';
   import { isBench } from '../lib/seats.js';
-  import { passWindowTrouble } from '../lib/timers.js';
+  import { passWindowTrouble, timerProblems } from '../lib/timers.js';
   import {
     DISCARD_ARM_MS,
     RUN_KEYS,
@@ -236,9 +236,31 @@
       };
     })
   );
-  /** A finished heat needs no timer, so it carries no warning. */
+  /**
+   * The warnings about this heat's timers: one for a timer that is gone, not connected or
+   * without the event's pass window, and one for each thing a connected timer says is
+   * wrong with it. A finished heat needs no timer, so it carries no warning.
+   */
   const timerTrouble = $derived(
-    phase && !phase.complete && !phase.locked ? timedBy.filter((t) => t.trouble !== undefined) : []
+    phase && !phase.complete && !phase.locked
+      ? timedBy.flatMap((t) => {
+          const status = live.timersLoaded
+            ? live.timers.find((view) => view.timer.id === t.adapter)?.status
+            : undefined;
+          return [
+            ...(t.trouble !== undefined
+              ? [{ key: t.adapter, trouble: t.trouble, detail: t.detail }]
+              : []),
+            ...(status
+              ? timerProblems(t.name, status).map((p) => ({
+                  key: `${t.adapter}:${p.code}`,
+                  trouble: p.trouble,
+                  detail: p.detail
+                }))
+              : [])
+          ];
+        })
+      : []
   );
   /**
    * What to say about video: nothing when it is off, a warning before Start when a race
@@ -482,7 +504,7 @@
       <ErrorBanner error={{ code: 'Internal', message: live.loadError }} />
     {/if}
 
-    {#each timerTrouble as t (t.adapter)}
+    {#each timerTrouble as t (t.key)}
       <Banner tone="warn" title={t.trouble}>{t.detail}</Banner>
     {/each}
     {#if video.kind === 'warning'}

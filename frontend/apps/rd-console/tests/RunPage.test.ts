@@ -1112,6 +1112,59 @@ describe('RunPage: what times the heat', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('warns before Start about each thing the timer says is wrong with it', async () => {
+    await open(eventView({ phases: [onGate()] }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { timer_problems: ['node_missing', 'crashed'] })
+      ])
+    });
+    const warnings = screen.getAllByRole('alert');
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toHaveTextContent('A receiver on Gate is not answering.');
+    expect(warnings[0]).toHaveTextContent('Some seats may not be timed.');
+    expect(warnings[1]).toHaveTextContent('Gate restarted after a failure.');
+    // A warning, not a lock: the director decides.
+    expect(screen.getByRole('button', { name: /^Start/ })).toBeEnabled();
+    expect(document.body.textContent).not.toMatch(/node_missing|crashed\b/);
+    expect(document.body.textContent).not.toContain(GATE_ID);
+  });
+
+  it('says a timer problem beside the pass window warning, not in place of it', async () => {
+    await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { timer_problems: ['safe_mode'] })
+      ])
+    });
+    const said = screen.getAllByRole('alert').map((alert) => alert.textContent);
+    expect(said).toHaveLength(2);
+    expect(said[0]).toContain('Gate has no pass window.');
+    expect(said[1]).toContain('Gate started in safe mode.');
+  });
+
+  it('a timer that is not connected says only that, whatever it last reported', async () => {
+    await open(eventView({ phases: [onGate()] }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { connected: false, timer_problems: ['node_missing'] })
+      ])
+    });
+    const warning = screen.getByRole('alert');
+    expect(warning).toHaveTextContent('Gate is not connected.');
+  });
+
+  it('a timer with nothing wrong, and a heat that is finished, carry no timer warning', async () => {
+    await open(eventView({ phases: [onGate()] }), {
+      listTimers: vi.fn(async () => [timerView(GATE_ID, 'Gate', 4, { timer_problems: [] })])
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    cleanup();
+    await open(eventView({ phases: [onGate({ complete: true })] }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { timer_problems: ['node_missing'] })
+      ])
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it("says why, in the Director's words, when the pass window could not be put on the timer", async () => {
     const SAID = 'Gate refused the change: pass_window_ms out of range.';
     await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {

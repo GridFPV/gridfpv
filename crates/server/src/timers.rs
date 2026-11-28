@@ -177,6 +177,18 @@ pub struct TimerStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub config_rev: Option<u32>,
+    /// What the timer says is wrong with it, as the short names it gives (OFT spec §6.3):
+    /// `node_missing`, `safe_mode`, `crashed`, or a name Grid does not know. A console
+    /// turns the ones it knows into words. Empty when the timer knows of nothing wrong,
+    /// while it is not connected, and on a timer that does not say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub timer_problems: Vec<String>,
+    /// The address of the timer's own page, where its network, wiring and firmware are
+    /// set. Absent until the timer has said, and on a timer with no such page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub manage_url: Option<String>,
 }
 
 /// Who may change a timer's settings.

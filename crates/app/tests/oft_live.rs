@@ -236,6 +236,30 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     };
     let view = eventually("the timer to connect", 15, || connected(&registry)).await;
     assert_eq!(view.status.seats, vec![SeatRef("0".into())]);
+    // The daemon names its own page (spec v0.12: `manage_url` is "/"), read as soon as it
+    // connects, and says nothing is wrong: its simulated receiver is always there.
+    let page = eventually("the timer's own page to be known", 3, || {
+        registry.timers().list()[0].status.manage_url.clone()
+    })
+    .await;
+    assert_eq!(page, format!("http://{}/", view.timer.address));
+    // There is a page there: the daemon answers a plain `GET /` with a 200.
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::TcpStream::connect(&view.timer.address)
+            .await
+            .unwrap();
+        let ask = format!(
+            "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            view.timer.address
+        );
+        socket.write_all(ask.as_bytes()).await.unwrap();
+        let mut answer = vec![0u8; 64];
+        let read = socket.read(&mut answer).await.unwrap();
+        let answer = String::from_utf8_lossy(&answer[..read]).into_owned();
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+    assert!(registry.timers().list()[0].status.timer_problems.is_empty());
     // On one machine the clock is known to well under a millisecond, within two seconds of
     // connecting (the link opens with a burst of quick measurements).
     eventually("a good clock measurement", 2, || {

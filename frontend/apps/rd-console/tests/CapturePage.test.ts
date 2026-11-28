@@ -398,7 +398,8 @@ describe('a timer shared with another program', () => {
   it('says who has control of the timer, and where to put that right', async () => {
     const held = timerView(ID, 'Gate', 2, {
       control: { holder: 'Other', name: 'RotorHazard pi-timer' },
-      control_name: 'GridFPV race-laptop'
+      control_name: 'GridFPV race-laptop',
+      manage_url: 'http://192.168.1.50:7270/'
     });
     open({}, held);
     const banner = await screen.findByTestId('control-trouble');

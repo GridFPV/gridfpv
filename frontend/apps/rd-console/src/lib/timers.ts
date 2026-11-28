@@ -101,14 +101,15 @@ export function passWindowTrouble(
  * got there first (RotorHazard, or a person at the timer's own page), Grid still reads the
  * timer and takes its laps, but the timer refuses Grid's changes. Only a person at the
  * timer's own page can move control, so the words point there: `page` is that page's
- * address, and `detail` names what Grid is listed as on it.
+ * address as the timer gave it (absent on a timer that names no page), and `detail` names
+ * what Grid is listed as on it.
  *
  * A timer that is not connected is said to be not connected, which is the bigger problem.
  */
 export function controlTrouble(
-  timer: Pick<Timer, 'name' | 'address'>,
-  status: Pick<TimerStatus, 'connected' | 'control' | 'control_name'>
-): { trouble: string; detail: string; page: string } | undefined {
+  timer: Pick<Timer, 'name'>,
+  status: Pick<TimerStatus, 'connected' | 'control' | 'control_name' | 'manage_url'>
+): { trouble: string; detail: string; page: string | undefined } | undefined {
   if (!status.connected || status.control?.holder !== 'Other') return undefined;
   const who = status.control.name.trim();
   const grid = status.control_name ? `“${status.control_name}”` : 'Grid';
@@ -117,6 +118,61 @@ export function controlTrouble(
       ? `“${who}” has control of ${timer.name}.`
       : `Another program has control of ${timer.name}.`,
     detail: `Grid still shows its settings and takes its laps, but cannot change it. To change it from here, open the timer's own page and give control to ${grid}.`,
-    page: `http://${timer.address}/`
+    page: status.manage_url
   };
+}
+
+/** One thing a timer says is wrong with it, in words. */
+export interface TimerProblem {
+  /** The timer's own short name for it (`node_missing`). A key, not for showing. */
+  code: string;
+  trouble: string;
+  detail: string;
+}
+
+/**
+ * What a timer says is wrong with it (OFT spec §6.3), in words, in the timer's order. Empty
+ * when it says nothing is.
+ *
+ * The timer gives short names. The ones Grid knows get a sentence. One it does not know is
+ * shown as the timer wrote it, as the spec asks, so a newer timer's problem is still seen.
+ *
+ * A timer that is not connected is said to be not connected, which is the bigger problem.
+ */
+export function timerProblems(
+  name: string,
+  status: Pick<TimerStatus, 'connected' | 'timer_problems'>
+): TimerProblem[] {
+  if (!status.connected) return [];
+  const seen = new Set<string>();
+  return (status.timer_problems ?? [])
+    .filter((code) => !seen.has(code) && seen.add(code))
+    .map((code) => {
+      switch (code) {
+        case 'node_missing':
+          return {
+            code,
+            trouble: `A receiver on ${name} is not answering.`,
+            detail: 'Some seats may not be timed.'
+          };
+        case 'safe_mode':
+          return {
+            code,
+            trouble: `${name} started in safe mode.`,
+            detail: 'It may be using fewer receivers. Its own page says how to leave safe mode.'
+          };
+        case 'crashed':
+          return {
+            code,
+            trouble: `${name} restarted after a failure.`,
+            detail: 'It is timing again. The details are on its own page.'
+          };
+        default:
+          return {
+            code,
+            trouble: `${name} reports a problem: ${code}.`,
+            detail: 'Grid does not know this one. The timer’s own page may say more.'
+          };
+      }
+    });
 }

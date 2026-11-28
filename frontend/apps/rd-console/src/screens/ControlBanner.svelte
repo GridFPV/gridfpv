@@ -17,7 +17,9 @@
   <div data-testid="control-trouble">
     <Banner tone="warn" title={trouble.trouble}>
       {trouble.detail}
-      <a href={trouble.page} target="_blank" rel="noreferrer">Open the timer's page</a>
+      {#if trouble.page}
+        <a href={trouble.page} target="_blank" rel="noreferrer">Open the timer's page</a>
+      {/if}
     </Banner>
   </div>
 {/if}

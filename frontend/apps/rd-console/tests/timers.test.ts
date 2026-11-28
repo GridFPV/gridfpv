@@ -113,7 +113,8 @@ describe('controlTrouble', () => {
       controlTrouble(gate, {
         connected: true,
         control: { holder: 'Other', name: 'RotorHazard pi-timer' },
-        control_name: 'GridFPV race-laptop'
+        control_name: 'GridFPV race-laptop',
+        manage_url: 'http://192.168.1.50:7270/'
       })
     ).toEqual({
       trouble: '“RotorHazard pi-timer” has control of Gate.',
@@ -131,6 +132,8 @@ describe('controlTrouble', () => {
     });
     expect(said?.trouble).toBe('Another program has control of Gate.');
     expect(said?.detail).toContain('give control to Grid.');
+    // The timer named no page of its own: none is made up from its address.
+    expect(said?.page).toBeUndefined();
   });
 
   it('leaves a timer that is not connected to the bigger warning', async () => {
@@ -141,5 +144,56 @@ describe('controlTrouble', () => {
         control: { holder: 'Other', name: 'RotorHazard' }
       })
     ).toBeUndefined();
+  });
+});
+
+describe('timerProblems', () => {
+  it('says nothing for a timer with nothing wrong, or one that does not say', async () => {
+    const { timerProblems } = await import('../src/lib/timers.js');
+    expect(timerProblems('Gate', { connected: true })).toEqual([]);
+    expect(timerProblems('Gate', { connected: true, timer_problems: [] })).toEqual([]);
+  });
+
+  it('puts each problem the timer names into words, in the timer’s order', async () => {
+    const { timerProblems } = await import('../src/lib/timers.js');
+    const said = timerProblems('Gate', {
+      connected: true,
+      timer_problems: ['crashed', 'node_missing', 'safe_mode']
+    });
+    expect(said.map((p) => p.code)).toEqual(['crashed', 'node_missing', 'safe_mode']);
+    expect(said.map((p) => p.trouble)).toEqual([
+      'Gate restarted after a failure.',
+      'A receiver on Gate is not answering.',
+      'Gate started in safe mode.'
+    ]);
+    for (const p of said) {
+      expect(p.detail).not.toBe('');
+      expect(`${p.trouble} ${p.detail}`).not.toMatch(/node_missing|safe_mode|crashed/);
+    }
+  });
+
+  it('shows a name it does not know as the timer wrote it', async () => {
+    const { timerProblems } = await import('../src/lib/timers.js');
+    expect(timerProblems('Gate', { connected: true, timer_problems: ['low_voltage'] })).toEqual([
+      {
+        code: 'low_voltage',
+        trouble: 'Gate reports a problem: low_voltage.',
+        detail: 'Grid does not know this one. The timer’s own page may say more.'
+      }
+    ]);
+  });
+
+  it('says a problem once when the timer lists it twice', async () => {
+    const { timerProblems } = await import('../src/lib/timers.js');
+    expect(
+      timerProblems('Gate', { connected: true, timer_problems: ['crashed', 'crashed'] })
+    ).toHaveLength(1);
+  });
+
+  it('leaves a timer that is not connected to the bigger warning', async () => {
+    const { timerProblems } = await import('../src/lib/timers.js');
+    expect(timerProblems('Gate', { connected: false, timer_problems: ['node_missing'] })).toEqual(
+      []
+    );
   });
 });
