@@ -42,17 +42,69 @@
      * so a screen-reader user hearing it out of context knows what they are opening.
      */
     label?: string;
-    /** Which edge the bubble hangs from, so it never runs off the side of a narrow panel. */
+    /** Which edge of the trigger the bubble hangs from. It is kept inside the window either way. */
     align?: 'start' | 'end';
   } = $props();
 
   let open = $state(false);
+  /** Whether the pointer or the keyboard is on it, which shows the bubble too. */
+  let near = $state(false);
+  let trigger = $state<HTMLButtonElement>();
+  let bubble = $state<HTMLSpanElement>();
+  /** Where the bubble sits in the window, worked out each time it is shown. */
+  let at = $state<{ top: number; left: number }>();
+
+  /** The gap kept between the bubble and the trigger, and the edge of the window. */
+  const GAP = 8;
+
+  /**
+   * Put the bubble by its trigger, inside the window.
+   *
+   * The bubble is `position: fixed`, so a card that clips what runs over its edge
+   * (`overflow: hidden`) cannot cut it off. It hangs under the trigger from the asked-for edge,
+   * is pushed back in from the sides of the window, and goes above when there is no room below.
+   */
+  function place(): void {
+    if (!trigger || !bubble) return;
+    const by = trigger.getBoundingClientRect();
+    const size = bubble.getBoundingClientRect();
+    const wide = document.documentElement.clientWidth;
+    const tall = document.documentElement.clientHeight;
+    const wanted = align === 'end' ? by.right - size.width : by.left;
+    const left = Math.max(GAP, Math.min(wanted, wide - size.width - GAP));
+    const below = by.bottom + GAP;
+    const above = by.top - GAP - size.height;
+    const top = below + size.height > tall - GAP && above >= GAP ? above : below;
+    at = { top, left };
+  }
+
+  // While it shows, follow the page: it scrolls under a bubble fixed to the window.
+  $effect(() => {
+    if (!open && !near) return;
+    place();
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  });
+
   /** Document-unique, so `aria-describedby` points at THIS tip's text and not another's. */
   const id = `gf-infotip-${Math.random().toString(36).slice(2, 10)}`;
 </script>
 
-<span class="gf-infotip" data-align={align}>
+<span
+  class="gf-infotip"
+  data-align={align}
+  role="presentation"
+  onmouseenter={() => (near = true)}
+  onmouseleave={() => (near = false)}
+  onfocusin={() => (near = true)}
+  onfocusout={() => (near = false)}
+>
   <button
+    bind:this={trigger}
     type="button"
     class="gf-infotip-trigger"
     aria-label={label}
@@ -68,7 +120,15 @@
   >
   <!-- Always in the DOM (never `{#if}`) so `aria-describedby` always resolves: a screen reader
        reads it on focus whether or not it is visually shown. CSS decides visibility. -->
-  <span {id} class="gf-infotip-bubble" role="tooltip" data-open={open}>{text}</span>
+  <span
+    bind:this={bubble}
+    {id}
+    class="gf-infotip-bubble"
+    role="tooltip"
+    data-open={open}
+    style:top={at ? `${at.top}px` : undefined}
+    style:left={at ? `${at.left}px` : undefined}>{text}</span
+  >
 </span>
 
 <style>
@@ -106,11 +166,14 @@
   }
 
   .gf-infotip-bubble {
-    position: absolute;
-    top: calc(100% + var(--gf-space-2));
+    /* Fixed to the window, and placed by the script: a card that clips its own overflow
+       cannot cut the bubble off. */
+    position: fixed;
+    top: 0;
+    left: 0;
     z-index: 40;
     width: max-content;
-    max-width: 22rem;
+    max-width: min(22rem, calc(100vw - 1rem));
     padding: var(--gf-space-3) var(--gf-space-4);
     border-radius: var(--gf-radius-md);
     border: 1px solid var(--gf-border-strong);
@@ -131,12 +194,6 @@
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-  }
-  .gf-infotip[data-align='start'] .gf-infotip-bubble {
-    left: 0;
-  }
-  .gf-infotip[data-align='end'] .gf-infotip-bubble {
-    right: 0;
   }
   .gf-infotip:hover .gf-infotip-bubble,
   .gf-infotip-trigger:focus-visible + .gf-infotip-bubble,

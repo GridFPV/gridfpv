@@ -182,7 +182,7 @@ test('an owner runs the club from the page, and Grid goes along with it', async 
   await ryan.getByLabel('Name', { exact: true }).fill('Recon Whoop Club');
   await ryan.getByRole('form', { name: 'Club name' }).getByRole('button', { name: 'Save' }).click();
   // The club's address follows its name, and the page goes along.
-  await expect(ryan).toHaveURL(/#\/manage\/recon-whoop-club\/settings$/);
+  await expect(ryan).toHaveURL(/#\/admin\/club\/recon-whoop-club\/settings$/);
   await expect(ryan.getByText('Recon Whoop Club', { exact: true })).toBeVisible();
   await listed(visitor);
   await expect(visitor.getByRole('heading', { name: 'Recon Whoop Club' })).toBeVisible();

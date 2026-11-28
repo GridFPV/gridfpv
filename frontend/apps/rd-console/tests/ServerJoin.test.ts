@@ -296,7 +296,7 @@ describe("who can join, on a club's own page", () => {
   ];
 
   it('starts private, and a director makes it public and private again', async () => {
-    const { people, server } = open('#/manage/north/settings', fakeServer({ account: ACE }));
+    const { people, server } = open('#/admin/club/north/settings', fakeServer({ account: ACE }));
     // The page is drawn again after each change, so the card is looked up each time.
     const state = async () => within(await setting()).getByTestId('club-open-state');
     expect(await state()).toHaveTextContent('Private');
@@ -315,12 +315,12 @@ describe("who can join, on a club's own page", () => {
   it('opens on a club that is already public', async () => {
     const server = fakeServer({ account: ACE });
     server.clubList = [club(NORTH, { open: true }), club(SOUTH)];
-    open('#/manage/north/settings', server);
+    open('#/admin/club/north/settings', server);
     expect(within(await setting()).getByTestId('club-open-state')).toHaveTextContent('Public');
   });
 
   it('says nobody is waiting when nobody is', async () => {
-    open('#/manage/north', fakeServer({ account: ACE }));
+    open('#/admin/club/north', fakeServer({ account: ACE }));
     expect(await within(await asking()).findByTestId('no-join-asks')).toHaveTextContent(
       'Nobody is waiting.'
     );
@@ -334,7 +334,7 @@ describe("who can join, on a club's own page", () => {
         { id: 'acct_quin', name: 'Quin', asked_at: 2 }
       ]
     };
-    const { people } = open('#/manage/north', server);
+    const { people } = open('#/admin/club/north', server);
     const card = await asking();
     const asks = await within(card).findAllByTestId('join-ask');
     // The first to ask is at the top. A callsign shows beside the name.
@@ -363,7 +363,7 @@ describe("who can join, on a club's own page", () => {
   it('reads the list again when an answer is refused, so a stale row does not stay', async () => {
     const server = fakeServer({ account: ACE });
     server.joinAsks = { north: [{ id: 'acct_pia', name: 'Pia', asked_at: 1 }] };
-    open('#/manage/north', server);
+    open('#/admin/club/north', server);
     const card = await asking();
     await within(card).findByTestId('join-ask');
     // She took her ask back a moment ago.
@@ -375,7 +375,7 @@ describe("who can join, on a club's own page", () => {
 
   it('finds someone by name or callsign and adds them as a pilot', async () => {
     const server = fakeServer({ account: ACE, people: PEOPLE });
-    const { people } = open('#/manage/north', server);
+    const { people } = open('#/admin/club/north', server);
     const card = await adding();
     const find = within(card).getByRole('button', { name: 'Find' }) as HTMLButtonElement;
     const box = within(card).getByLabelText('Name or callsign') as HTMLInputElement;
@@ -405,7 +405,7 @@ describe("who can join, on a club's own page", () => {
 
   it('does not offer someone who is already in the club, and says when nobody matches', async () => {
     const server = fakeServer({ account: ACE, people: PEOPLE });
-    open('#/manage/north', server);
+    open('#/admin/club/north', server);
     const card = await adding();
     const box = within(card).getByLabelText('Name or callsign');
     // Bee is a member of North already.
@@ -423,7 +423,7 @@ describe("who can join, on a club's own page", () => {
 
   it("says the server's words when adding is refused", async () => {
     const server = fakeServer({ account: ACE, people: PEOPLE });
-    const { people } = open('#/manage/north', server);
+    const { people } = open('#/admin/club/north', server);
     const card = await adding();
     await fireEvent.input(within(card).getByLabelText('Name or callsign'), {
       target: { value: 'quin' }
@@ -439,7 +439,7 @@ describe("who can join, on a club's own page", () => {
 
   it('is not shown to a claims approver, who does not run the club', async () => {
     open(
-      '#/manage/north',
+      '#/admin/club/north',
       fakeServer({ account: { ...ACE, clubs: [{ club: NORTH, role: 'Approver' }] } })
     );
     await screen.findByTestId('server-club');
@@ -451,7 +451,7 @@ describe("who can join, on a club's own page", () => {
     const server = fakeServer({ account: { ...ACE, owner: true } });
     server.clubList = [club(NORTH, { archived: true })];
     server.joinAsks = { north: [{ id: 'acct_pia', name: 'Pia', asked_at: 1 }] };
-    open('#/manage/north', server);
+    open('#/admin/club/north', server);
     const card = await asking();
     await within(card).findByTestId('join-ask');
     for (const button of within(card).getAllByRole('button')) {

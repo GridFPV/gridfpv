@@ -90,8 +90,10 @@ test('an owner lets anyone make an account, and a pilot fills in their own profi
   await expect.poll(() => new URL(pia.url()).hash).toBe('#/account');
   // She is an owner of nothing, and runs no club.
   await expect(pia.getByText('Server owner')).toHaveCount(0);
-  await expect(pia.getByRole('link', { name: 'Server', exact: true })).toHaveCount(0);
-  await expect(pia.getByRole('link', { name: 'Club', exact: true })).toHaveCount(0);
+  await expect(pia.getByRole('navigation', { name: 'Area' })).toHaveCount(0);
+  await pia.goto(`${server.baseUrl}/#/admin`);
+  await expect(pia.getByTestId('admin-nothing')).toBeVisible();
+  await pia.goto(`${server.baseUrl}/#/account`);
 
   // ── She fills in her pilot profile. ───────────────────────────────────────
   const profile = pia.getByTestId('pilot-profile');

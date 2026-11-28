@@ -52,6 +52,8 @@ export type ServerPlace =
   | { kind: 'manage'; club: string; page: ManagePage }
   /** Running the server, for its owners. */
   | { kind: 'admin'; page: AdminPage }
+  /** The way in to the admin area. The page goes on to the first thing the person runs. */
+  | { kind: 'admin-home' }
   /** The events the signed-in account's pilots flew. */
   | { kind: 'results' };
 
@@ -79,6 +81,20 @@ export function sideOfPlace(place: ServerPlace): ServerSide | undefined {
   }
 }
 
+/**
+ * The two areas of the page. The pilot area is what everyone sees: events, clubs, results
+ * and a person's own account. The admin area is apart from it, for those who run a club or
+ * the server. Every address of the admin area starts `#/admin`.
+ */
+export type ServerMode = 'pilot' | 'admin';
+
+/** Which area a place is in. */
+export function modeOfPlace(place: ServerPlace): ServerMode {
+  return place.kind === 'manage' || place.kind === 'admin' || place.kind === 'admin-home'
+    ? 'admin'
+    : 'pilot';
+}
+
 /** A page of a part, when the word after it names one. The first page when there is none. */
 function pageOf<T extends string>(pages: readonly T[], word: string | undefined): T | undefined {
   if (word === undefined) return pages[0];
@@ -97,8 +113,9 @@ function pageOf<T extends string>(pages: readonly T[], word: string | undefined)
  * - `#/sign-in`, `#/sign-in?problem=‹code›`
  * - `#/invite/‹secret›`, `#/reconnect/‹secret›`, `#/confirm-email/‹secret›`
  * - `#/account`, `#/account/clubs`, `#/account/sign-in`
- * - `#/manage/‹word›`, `#/manage/‹word›/‹page›`: running a club
- * - `#/admin`, `#/admin/sign-in`, `#/admin/email`: running the server
+ * - `#/admin`: the admin area
+ * - `#/admin/club/‹word›`, `#/admin/club/‹word›/‹page›`: running a club
+ * - `#/admin/server`, `#/admin/server/sign-in`, `#/admin/server/email`: running the server
  */
 export function parseServerHash(hash: string): ServerPlace {
   const [path, query = ''] = hash.replace(/^#\/?/, '').split('?');
@@ -126,13 +143,19 @@ export function parseServerHash(hash: string): ServerPlace {
       const page = pageOf(ACCOUNT_PAGES, rest[0]);
       if (page) return { kind: 'account', page };
     }
-    if (first === 'manage' && (rest.length === 1 || rest.length === 2)) {
-      const page = pageOf(MANAGE_PAGES, rest[1]);
-      if (page) return { kind: 'manage', club: rest[0], page };
-    }
-    if (first === 'admin' && rest.length <= 1) {
-      const page = pageOf(ADMIN_PAGES, rest[0]);
-      if (page) return { kind: 'admin', page };
+    if (first === 'admin') {
+      const [area, ...inside] = rest;
+      if (area === undefined) return { kind: 'admin-home' };
+      if (area === 'club' && (inside.length === 1 || inside.length === 2)) {
+        const page = pageOf(MANAGE_PAGES, inside[1]);
+        if (page) return { kind: 'manage', club: inside[0], page };
+      }
+      if (area === 'server' && inside.length <= 1) {
+        const page = pageOf(ADMIN_PAGES, inside[0]);
+        if (page) return { kind: 'admin', page };
+      }
+      // Anything else under `#/admin` is still the admin area, not the list of events.
+      return { kind: 'admin-home' };
     }
     if (first === 'results' && rest.length === 0) return { kind: 'results' };
   } catch {
@@ -164,11 +187,13 @@ export function formatServerHash(place: ServerPlace): string {
     case 'account':
       return place.page === ACCOUNT_PAGES[0] ? '#/account' : `#/account/${place.page}`;
     case 'manage': {
-      const club = `#/manage/${encodeURIComponent(place.club)}`;
+      const club = `#/admin/club/${encodeURIComponent(place.club)}`;
       return place.page === MANAGE_PAGES[0] ? club : `${club}/${place.page}`;
     }
     case 'admin':
-      return place.page === ADMIN_PAGES[0] ? '#/admin' : `#/admin/${place.page}`;
+      return place.page === ADMIN_PAGES[0] ? '#/admin/server' : `#/admin/server/${place.page}`;
+    case 'admin-home':
+      return '#/admin';
     case 'results':
       return '#/results';
   }

@@ -43,18 +43,19 @@ describe('the account pages have addresses', () => {
     expect(parseServerHash('#/account')).toEqual({ kind: 'account', page: 'profile' });
     expect(parseServerHash('#/account/clubs')).toEqual({ kind: 'account', page: 'clubs' });
     expect(parseServerHash('#/account/sign-in')).toEqual({ kind: 'account', page: 'sign-in' });
-    expect(parseServerHash('#/manage/north')).toEqual({
+    expect(parseServerHash('#/admin/club/north')).toEqual({
       kind: 'manage',
       club: 'north',
       page: 'members'
     });
-    expect(parseServerHash('#/manage/north/tokens')).toEqual({
+    expect(parseServerHash('#/admin/club/north/tokens')).toEqual({
       kind: 'manage',
       club: 'north',
       page: 'tokens'
     });
-    expect(parseServerHash('#/admin')).toEqual({ kind: 'admin', page: 'clubs' });
-    expect(parseServerHash('#/admin/email')).toEqual({ kind: 'admin', page: 'email' });
+    expect(parseServerHash('#/admin')).toEqual({ kind: 'admin-home' });
+    expect(parseServerHash('#/admin/server')).toEqual({ kind: 'admin', page: 'clubs' });
+    expect(parseServerHash('#/admin/server/email')).toEqual({ kind: 'admin', page: 'email' });
     // The server sends a browser back to `#/` after signing in.
     expect(parseServerHash('#/')).toEqual({ kind: 'list' });
   });
@@ -65,16 +66,23 @@ describe('the account pages have addresses', () => {
       '#/invite/a/b',
       '#/club',
       '#/manage',
-      '#/manage/a/b',
-      '#/manage/a/members/b',
-      '#/admin/x',
-      '#/admin/clubs/x',
       '#/account/x',
       '#/sign-in/x',
       '#/Account',
       '#/invite/%E0%A4%A'
     ]) {
       expect(parseServerHash(hash)).toEqual({ kind: 'list' });
+    }
+    // Anything under `#/admin` that is not quite a page is still the admin area.
+    for (const hash of [
+      '#/admin/club',
+      '#/admin/club/a/b',
+      '#/admin/club/a/members/b',
+      '#/admin/x',
+      '#/admin/server/x',
+      '#/admin/server/clubs/x'
+    ]) {
+      expect(parseServerHash(hash)).toEqual({ kind: 'admin-home' });
     }
     // An empty problem is no problem.
     expect(parseServerHash('#/sign-in?problem=')).toEqual({ kind: 'sign-in' });

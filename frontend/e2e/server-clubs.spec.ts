@@ -94,7 +94,7 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   // ── A link token for the new club, made on its page. ──────────────────────
   await north.getByRole('link', { name: 'North Whoops' }).click();
   // The club is in the address by its word, and the box at the top says which club it is.
-  await expect(ryan).toHaveURL(/#\/manage\/north-whoops$/);
+  await expect(ryan).toHaveURL(/#\/admin\/club\/north-whoops$/);
   await expect(ryan.getByTestId('club-pick').locator('option:checked')).toHaveText('North Whoops');
   await openServerPage(ryan, 'Settings');
   await expect(ryan.getByTestId('club-own-address')).toHaveText(
@@ -140,11 +140,11 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   await ryan.getByLabel('Name', { exact: true }).fill('Northern Whoops');
   await ryan.getByRole('form', { name: 'Club name' }).getByRole('button', { name: 'Save' }).click();
   // The page goes on to the club's new address, on the same page of it.
-  await expect(ryan).toHaveURL(/#\/manage\/northern-whoops\/settings$/);
+  await expect(ryan).toHaveURL(/#\/admin\/club\/northern-whoops\/settings$/);
   await expect(ryan.getByTestId('club-pick').locator('option:checked')).toHaveText(
     'Northern Whoops'
   );
-  const northPage = `${server.baseUrl}/#/manage/northern-whoops`;
+  const northPage = `${server.baseUrl}/#/admin/club/northern-whoops`;
   for (const word of ['northern-whoops', 'north-whoops', 'North-Whoops']) {
     await visitor.goto(`${server.baseUrl}/#/club/${word}`);
     await visitor.reload();
@@ -204,7 +204,7 @@ test('an owner makes a second club, a director sends to it, and it is archived a
     return (await ryan.getByTestId('invite-link').innerText()).trim();
   };
   const mateo = await fresh(browser);
-  await mateo.goto(await inviteFrom(`${server.baseUrl}/#/manage/club`));
+  await mateo.goto(await inviteFrom(`${server.baseUrl}/#/admin/club/club`));
   provider.person = { sub: 'sub-mateo', name: 'Mateo' };
   await mateo.getByRole('link', { name: 'Continue with Test login' }).click();
   await expect(mateo.getByTestId('server-who')).toHaveText('Mateo');
