@@ -9,6 +9,8 @@ import type {
   EmailConfirmed,
   ServerEmail,
   ServerEmailChange,
+  ServerSignInService,
+  ServerSignInServiceChange,
   ServerClub,
   MySignIn,
   ReconnectMade,
@@ -102,6 +104,13 @@ export interface FakeServer {
   knowsAddress: boolean;
   /** Who a test mail was sent to, in order. */
   mailTests: string[];
+  /** The Discord and Google apps an owner set on the page, with their secrets. */
+  apps: Record<string, { client_id: string; client_secret: string }>;
+  /**
+   * The services set up in the server's own settings file, by id. Left out, they are
+   * the ones the server started with.
+   */
+  envApps?: string[];
   /** Links sent to confirm an address: secret to the address. */
   emailLinks: Record<string, string>;
   /** Who a link to set a new password was asked for, in order. */
@@ -158,6 +167,7 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     emailOn: false,
     knowsAddress: true,
     mailTests: [],
+    apps: {},
     emailLinks: {},
     forgotten: [],
     passwords: {},
@@ -203,6 +213,47 @@ export function fakePeople(server: FakeServer) {
       password_set: password !== undefined,
       knows_address: server.knowsAddress
     };
+  };
+  /** The services in the server's own settings file: what it started with. */
+  const envApps = server.envApps ?? server.providers.map((p) => p.id);
+  const envNames = Object.fromEntries(server.providers.map((p) => [p.id, p.name]));
+  const NAMED = [
+    ['discord', 'Discord'],
+    ['google', 'Google']
+  ] as const;
+  const redirect = (id: string) =>
+    server.knowsAddress ? { redirect: `https://grid.example.org/auth/${id}/callback` } : {};
+  /** Every sign-in service, as an owner is shown it: never an app's secret. */
+  const servicesView = (): ServerSignInService[] => {
+    const named: ServerSignInService[] = NAMED.map(([id, name]) => {
+      const set = server.apps[id];
+      const source = set ? 'page' : envApps.includes(id) ? 'env' : 'off';
+      return {
+        id,
+        name,
+        source,
+        editable: true,
+        secret_set: source !== 'off',
+        ...(source === 'off' ? {} : { client_id: set?.client_id ?? `${id}-env-id` }),
+        ...redirect(id)
+      };
+    });
+    const others: ServerSignInService[] = envApps
+      .filter((id) => !NAMED.some(([known]) => known === id))
+      .map((id) => ({
+        id,
+        name: envNames[id] ?? id,
+        source: 'env',
+        editable: false,
+        secret_set: true,
+        client_id: `${id}-env-id`,
+        ...redirect(id)
+      }));
+    // What people are offered follows.
+    server.providers = [...named, ...others]
+      .filter((service) => service.source !== 'off')
+      .map(({ id, name }) => ({ id, name }));
+    return [...named, ...others];
   };
   const clubs: Record<string, { id: string; name: string }> = {
     north: { ...NORTH },
@@ -670,6 +721,42 @@ export function fakePeople(server: FakeServer) {
         refuse('Email is not set up yet. Save the settings first.');
       }
       server.mailTests.push(to.trim().toLowerCase());
+    }),
+    signInServices: vi.fn(async (): Promise<ServerSignInService[]> => {
+      owner();
+      return servicesView();
+    }),
+    setSignInService: vi.fn(
+      async (id: string, change: ServerSignInServiceChange): Promise<ServerSignInService[]> => {
+        owner();
+        if (!NAMED.some(([known]) => known === id)) {
+          refuse('This sign-in service cannot be set up on the page.');
+        }
+        const client_id = change.client_id.trim();
+        if (client_id === '') refuse('Give the client ID.');
+        if (/\s/.test(client_id)) {
+          refuse("That does not look like a client ID. Copy it again from the provider's page.");
+        }
+        const client_secret = change.client_secret?.trim() || server.apps[id]?.client_secret;
+        if (!client_secret) refuse('Give the client secret.');
+        server.apps[id] = { client_id, client_secret: client_secret as string };
+        return servicesView();
+      }
+    ),
+    removeSignInService: vi.fn(async (id: string): Promise<ServerSignInService[]> => {
+      owner();
+      const left = server.providers.filter((p) => p.id !== id || envApps.includes(id));
+      const mine = server.account?.sign_ins ?? [];
+      const otherWay = mine.some((held) =>
+        held.provider === 'password' ? server.passwordOn : left.some((p) => p.id === held.provider)
+      );
+      if (server.apps[id] && !envApps.includes(id) && !otherWay) {
+        refuse(
+          'This is the only way you sign in. Add another way to sign in first, or you would lock yourself out.'
+        );
+      }
+      delete server.apps[id];
+      return servicesView();
     }),
     setEmail: vi.fn(async (address: string) => {
       const account = server.account ?? refuse('Sign in first.');

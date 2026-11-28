@@ -402,6 +402,30 @@ secret. They are in `gridfpv-server.env`, under `OIDC`. Its redirect is
 
 ### 3. Give the server the two values
 
+**On the page.** This is the easy way for Discord and Google. You must be signed in as an
+owner to do it. On a new server nobody can sign in yet, so do this first:
+
+1. Run `gridfpv-serverctl password on`.
+2. Make yourself the owner with a username and a password. See step 4.
+
+Then:
+
+1. Switch to **Admin** at the top right.
+2. Open **Server**, then **Sign-in**.
+3. Under **Sign-in services**, press **Set up** beside Discord or Google.
+4. The box shows the **Redirect** for your server. It is the one from step 2.
+5. Paste the **Client ID** and the **Client secret**, and press **Save**.
+
+It works at once. There is nothing to restart. People see the new button the next time
+they open the sign-in page.
+
+- The secret is kept on the server and never shown again.
+- To change the Client ID, press **Change**. Leave the secret empty to keep it.
+- **Remove…** takes the service off. You cannot remove the only way you sign in
+  yourself. Add another way to your account first.
+
+**Or in the settings file.**
+
 - **Without Docker:** put them in `/etc/gridfpv-server.env`, then run
   `systemctl restart gridfpv-server`.
 - **With Docker:** put them in `docker/server/.env`, then run `docker compose up -d`:
@@ -414,6 +438,9 @@ secret. They are in `gridfpv-server.env`, under `OIDC`. Its redirect is
   ```
 
 The server's log says which providers are on when it starts.
+
+If a service is set in both places, the page wins. Your own sign-in service (OpenID
+Connect) can only be set in the settings file.
 
 ### 4. Make yourself the owner
 

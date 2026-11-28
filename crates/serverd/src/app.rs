@@ -38,6 +38,9 @@ pub struct AppState {
     pub public_url: Option<String>,
     /// The providers people can sign in with here (`signin`).
     pub providers: Arc<Vec<Provider>>,
+    /// A change made to a provider set up on the page before it is used. Tests point one
+    /// at a stand-in with it. `None` when the server runs for real.
+    pub provider_shape: Option<Arc<dyn Fn(Provider) -> Provider + Send + Sync>>,
     /// What pilots have asked for that a Director has yet to answer (`asks`).
     pub asks: Arc<Asks>,
     /// Who has guessed a password wrong, and how often (`password`).
@@ -88,6 +91,17 @@ impl AppState {
         self
     }
 
+    /// Change each provider set up on the page before it is used. For tests, which send
+    /// the browser to a stand-in and not to the real Discord or Google.
+    #[must_use]
+    pub fn with_provider_shape(
+        mut self,
+        shape: impl Fn(Provider) -> Provider + Send + Sync + 'static,
+    ) -> Self {
+        self.provider_shape = Some(Arc::new(shape));
+        self
+    }
+
     /// The server's state over a data folder, made ready if the folder is new.
     pub fn open(dir: &Path) -> Result<Self, BookError> {
         let accounts =
@@ -98,6 +112,7 @@ impl AppState {
             accounts: Arc::new(accounts),
             public_url: None,
             providers: Arc::default(),
+            provider_shape: None,
             asks: Arc::default(),
             guesses: Arc::default(),
             mailer: None,
@@ -274,6 +289,14 @@ pub fn router(state: AppState) -> Router {
             get(crate::email::get_server_email)
                 .put(crate::email::put_server_email)
                 .delete(crate::email::delete_server_email),
+        )
+        .route(
+            "/api/server/sign-in-services",
+            get(signin::get_server_services),
+        )
+        .route(
+            "/api/server/sign-in-services/{id}",
+            axum::routing::put(signin::put_server_service).delete(signin::delete_server_service),
         )
         .route(
             "/api/server/email/test",

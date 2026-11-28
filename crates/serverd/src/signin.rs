@@ -8,6 +8,12 @@
 //! | `GET /api/sign-in/providers` | which providers this server is set up for |
 //! | `GET /auth/{provider}/start` | send the browser to the provider |
 //! | `GET /auth/{provider}/callback` | the provider sends the browser back here |
+//! | `GET /api/server/sign-in-services` | an owner reads how each service is set up |
+//! | `PUT /api/server/sign-in-services/{id}` | an owner sets up Discord or Google |
+//! | `DELETE /api/server/sign-in-services/{id}` | an owner takes that back |
+//!
+//! Discord and Google are set up on the server's page by an owner, or in the environment.
+//! What is set on the page wins, and is used from the next sign-in on, with no restart.
 //!
 //! `start` takes `?invite=<secret>` when the person came by an invite link, and `?add=1`
 //! when a signed-in account is adding another way to sign in.
@@ -50,7 +56,9 @@ use ts_rs::TS;
 
 use crate::accounts::{AccountError, NewSignIn, PendingSignIn, RECONNECT_PREFIX};
 use crate::app::AppState;
-use crate::people::{MaybeSigned, now_ms, session_cookie};
+use crate::people::{MaybeSigned, Signed, now_ms, session_cookie};
+use crate::push::ApiError;
+use gridfpv_server::error::ErrorCode;
 
 /// The cookie that says which browser started a sign-in.
 pub const SIGNIN_COOKIE: &str = "grid_signin";
@@ -185,6 +193,51 @@ impl Provider {
     }
 }
 
+/// The two values of an app registered with a provider, as an owner gave them on the page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppKeys {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// The providers an owner can set up on the page: the ones this build knows by name.
+pub const PAGE_PROVIDERS: [(&str, &str); 2] = [("discord", "Discord"), ("google", "Google")];
+
+impl Provider {
+    /// One of the providers known by name, with an app's two values.
+    fn named(id: &str, keys: AppKeys) -> Option<Self> {
+        match id {
+            "discord" => Some(Self::discord(keys.client_id, keys.client_secret)),
+            "google" => Some(Self::google(keys.client_id, keys.client_secret)),
+            _ => None,
+        }
+    }
+}
+
+/// The providers people can sign in with right now. One set up on the page is used in
+/// place of the same one in the environment. The order is always Discord, Google, then a
+/// service of the owner's own.
+pub fn providers_now(state: &AppState) -> Vec<Provider> {
+    let mut page = state.book.sign_in_apps();
+    let mut found = Vec::new();
+    for (id, _) in PAGE_PROVIDERS {
+        let set = page
+            .remove(id)
+            .and_then(|keys| Provider::named(id, keys))
+            .map(|made| match &state.provider_shape {
+                Some(shape) => shape(made),
+                None => made,
+            });
+        let env = || state.providers.iter().find(|p| p.id == id).cloned();
+        if let Some(provider) = set.or_else(env) {
+            found.push(provider);
+        }
+    }
+    let named = |id: &str| PAGE_PROVIDERS.iter().any(|(known, _)| *known == id);
+    found.extend(state.providers.iter().filter(|p| !named(&p.id)).cloned());
+    found
+}
+
 /// The settings of a sign-in service of the server owner's own choosing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Custom {
@@ -213,15 +266,236 @@ pub async fn get_providers(State(state): State<AppState>) -> Json<Vec<SignInProv
         return Json(Vec::new());
     }
     Json(
-        state
-            .providers
-            .iter()
+        providers_now(&state)
+            .into_iter()
             .map(|p| SignInProvider {
-                id: p.id.clone(),
-                name: p.name.clone(),
+                id: p.id,
+                name: p.name,
             })
             .collect(),
     )
+}
+
+// ── Setting a service up on the page ────────────────────────────────────────
+
+/// Where a sign-in service's settings come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceSource {
+    /// An owner set them on the page.
+    Page,
+    /// They are in the server's environment.
+    Env,
+    /// Nowhere: nobody signs in with this service here.
+    Off,
+}
+
+/// A sign-in service, as an owner is shown it. The app's secret is never here: only
+/// whether there is one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerSignInService {
+    /// `discord`, `google`, or `oidc` for a service of the owner's own.
+    pub id: String,
+    /// The name on the button.
+    pub name: String,
+    pub source: ServiceSource,
+    /// Whether it can be set up on the page. A service of the owner's own cannot: it is
+    /// set in the environment.
+    pub editable: bool,
+    /// The app's client id. It is not a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub client_id: Option<String>,
+    /// Whether the app's secret is kept.
+    pub secret_set: bool,
+    /// The address to give the provider as the app's redirect. Not there when the server
+    /// does not know its own address (`GRIDFPV_SERVER_PUBLIC_URL`): then nobody can sign
+    /// in with any service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub redirect: Option<String>,
+}
+
+/// The two values of an app, as an owner gives them. A secret left out keeps the one
+/// that is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerSignInServiceChange {
+    pub client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub client_secret: Option<String>,
+}
+
+fn owner_only(standing: &crate::accounts::Standing) -> Result<(), ApiError> {
+    if standing.may(crate::accounts::Act::RunServer) {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        StatusCode::FORBIDDEN,
+        ErrorCode::Forbidden,
+        "Only an owner of this server can do that.",
+    ))
+}
+
+fn redirect_for(state: &AppState, id: &str) -> Option<String> {
+    state
+        .public_url
+        .as_ref()
+        .map(|base| format!("{base}/auth/{id}/callback"))
+}
+
+fn services(state: &AppState) -> Vec<ServerSignInService> {
+    let page = state.book.sign_in_apps();
+    let mut out = Vec::new();
+    for (id, name) in PAGE_PROVIDERS {
+        let env = state.providers.iter().find(|p| p.id == id);
+        let (source, client_id) = match (page.get(id), env) {
+            (Some(keys), _) => (ServiceSource::Page, Some(keys.client_id.clone())),
+            (None, Some(env)) => (ServiceSource::Env, Some(env.client_id.clone())),
+            (None, None) => (ServiceSource::Off, None),
+        };
+        out.push(ServerSignInService {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            source,
+            editable: true,
+            secret_set: source != ServiceSource::Off,
+            client_id,
+            redirect: redirect_for(state, id),
+        });
+    }
+    let named = |id: &str| PAGE_PROVIDERS.iter().any(|(known, _)| *known == id);
+    for other in state.providers.iter().filter(|p| !named(&p.id)) {
+        out.push(ServerSignInService {
+            id: other.id.clone(),
+            name: other.name.clone(),
+            source: ServiceSource::Env,
+            editable: false,
+            client_id: Some(other.client_id.clone()),
+            secret_set: true,
+            redirect: redirect_for(state, &other.id),
+        });
+    }
+    out
+}
+
+/// The longest a client id or a secret may be. The real ones are far shorter.
+const KEY_MAX: usize = 300;
+
+/// One of an app's two values, as typed or pasted: no spaces round it, and nothing in it
+/// that a value from a provider never has.
+fn clean_key(value: &str, what: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ApiError::bad(format!("Give the {what}.")));
+    }
+    if value.len() > KEY_MAX || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ApiError::bad(format!(
+            "That does not look like a {what}. Copy it again from the provider's page."
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn editable(id: &str) -> Result<(), ApiError> {
+    if PAGE_PROVIDERS.iter().any(|(known, _)| *known == id) {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        StatusCode::NOT_FOUND,
+        ErrorCode::UnknownScope,
+        "This sign-in service cannot be set up on the page.",
+    ))
+}
+
+/// `GET /api/server/sign-in-services`.
+pub async fn get_server_services(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+) -> Result<Json<Vec<ServerSignInService>>, ApiError> {
+    owner_only(&standing)?;
+    Ok(Json(services(&state)))
+}
+
+/// `PUT /api/server/sign-in-services/{id}`: set the app people sign in through. It is
+/// used from the next sign-in on. Nothing is asked of the provider to check it.
+pub async fn put_server_service(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Path(id): Path<String>,
+    Json(change): Json<ServerSignInServiceChange>,
+) -> Result<Json<Vec<ServerSignInService>>, ApiError> {
+    owner_only(&standing)?;
+    editable(&id)?;
+    let client_id = clean_key(&change.client_id, "client ID")?;
+    let given = change.client_secret.as_deref().map(str::trim).unwrap_or("");
+    let client_secret = if given.is_empty() {
+        // Nothing typed keeps the secret that was set on the page.
+        match state.book.sign_in_apps().remove(&id) {
+            Some(kept) => kept.client_secret,
+            None => return Err(ApiError::bad("Give the client secret.")),
+        }
+    } else {
+        clean_key(given, "client secret")?
+    };
+    state
+        .book
+        .set_sign_in_app(
+            &id,
+            Some(AppKeys {
+                client_id,
+                client_secret,
+            }),
+        )
+        .map_err(crate::manage::book_error)?;
+    Ok(Json(services(&state)))
+}
+
+/// `DELETE /api/server/sign-in-services/{id}`: forget what was set on the page. Settings
+/// in the environment, if there are any, are used again.
+///
+/// With none there, nobody signs in with the service any more. An owner is not let to do
+/// that when it is their only way in: they would have no way back but the command line.
+pub async fn delete_server_service(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ServerSignInService>>, ApiError> {
+    owner_only(&standing)?;
+    editable(&id)?;
+    let in_env = state.providers.iter().any(|p| p.id == id);
+    if !in_env && state.book.sign_in_apps().contains_key(&id) {
+        let mine = state.accounts.sign_ins(&standing.account)?;
+        let password = state.book.password_sign_in();
+        // A way in counts only when it would still work with this service gone.
+        let left: Vec<String> = providers_now(&state)
+            .into_iter()
+            .filter(|p| p.id != id)
+            .map(|p| p.id)
+            .collect();
+        let other_way = mine.iter().any(|held| {
+            if held.provider == crate::accounts::PASSWORD_PROVIDER {
+                password
+            } else {
+                left.contains(&held.provider)
+            }
+        });
+        if !other_way {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                ErrorCode::Refused,
+                "This is the only way you sign in. Add another way to sign in first, or you would lock yourself out.",
+            ));
+        }
+    }
+    state
+        .book
+        .set_sign_in_app(&id, None)
+        .map_err(crate::manage::book_error)?;
+    Ok(Json(services(&state)))
 }
 
 fn random(bytes: usize) -> String {
@@ -360,14 +634,14 @@ pub async fn get_start(
     Query(query): Query<StartQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(provider) = state
-        .providers
-        .iter()
+    let Some(provider) = providers_now(&state)
+        .into_iter()
         .find(|p| p.id == provider)
         .filter(|_| state.public_url.is_some())
     else {
         return go_problem(&state, &headers, Problem::NotSetUp);
     };
+    let provider = &provider;
     let adding = query.add.is_some();
     let add_to = match (adding, standing) {
         (true, Some(standing)) => Some(standing.account),
@@ -505,14 +779,14 @@ pub async fn get_callback(
     headers: HeaderMap,
 ) -> Response {
     let now = now_ms();
-    let Some(provider) = state
-        .providers
-        .iter()
+    let Some(provider) = providers_now(&state)
+        .into_iter()
         .find(|p| p.id == provider)
         .filter(|_| state.public_url.is_some())
     else {
         return go_problem(&state, &headers, Problem::NotSetUp);
     };
+    let provider = &provider;
     // Whatever else is true, a `state` is used up by being shown here.
     let given = query.state.as_deref().unwrap_or("");
     let pending = state.accounts.take_sign_in(given, now).ok().flatten();

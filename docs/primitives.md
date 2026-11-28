@@ -2178,6 +2178,12 @@ code of §13.13.
       page, as well as in the environment. What is set on the page wins, is used at once,
       and is kept with the server's other settings, in a file only its owner can read.
       The account's password is never sent back to a browser.
+    - Discord and Google can be set up by an owner on the server's Sign-in page, as well
+      as in the environment: the app's client id and its secret. What is set on the page
+      wins, and is used from the next sign-in on. It is kept with the server's other
+      settings. The secret is never sent back to a browser, and one left empty is kept.
+      An owner cannot remove a service that is the only way they sign in. A sign-in
+      service of the owner's own (OpenID Connect) is still set in the environment only.
     - With sign-up open, an invite that does not work still makes no account.
 14. **How the list of clubs in Grid was built (§13.2).** Choices made while building, not
     confirmed:

@@ -149,6 +149,10 @@ struct Pages {
     /// (§13.8). It holds that account's password, so this file is kept to its owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mail: Option<crate::email::MailSettings>,
+    /// The apps registered with Discord and Google, when an owner gave them on the page
+    /// (§13.8), by the provider's id. Each holds the app's secret.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    sign_in_apps: std::collections::BTreeMap<String, crate::signin::AppKeys>,
 }
 
 /// What the server notes about one event of a club, apart from the event itself.
@@ -459,6 +463,36 @@ impl Book {
     pub fn set_mail(&self, mail: Option<crate::email::MailSettings>) -> Result<(), BookError> {
         self.change(|pages| {
             pages.mail = mail;
+            Ok(())
+        })
+    }
+
+    /// The apps for sign-in services an owner gave on the page, by the provider's id.
+    pub fn sign_in_apps(&self) -> std::collections::BTreeMap<String, crate::signin::AppKeys> {
+        self.refresh();
+        self.held
+            .read()
+            .expect("book lock")
+            .pages
+            .sign_in_apps
+            .clone()
+    }
+
+    /// Keep the app for one sign-in service, or forget it.
+    pub fn set_sign_in_app(
+        &self,
+        provider: &str,
+        keys: Option<crate::signin::AppKeys>,
+    ) -> Result<(), BookError> {
+        self.change(|pages| {
+            match keys {
+                Some(keys) => {
+                    pages.sign_in_apps.insert(provider.to_owned(), keys);
+                }
+                None => {
+                    pages.sign_in_apps.remove(provider);
+                }
+            }
             Ok(())
         })
     }

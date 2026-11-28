@@ -61,7 +61,10 @@ import {
   serverMail,
   setServerMail,
   removeServerMail,
-  testServerMail
+  testServerMail,
+  serverSignInServices,
+  setServerSignInService,
+  removeServerSignInService
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
@@ -82,6 +85,8 @@ import type {
   EmailConfirmed,
   ServerEmail,
   ServerEmailChange,
+  ServerSignInService,
+  ServerSignInServiceChange,
   MyResult,
   PasswordChange,
   PasswordSignUp,
@@ -195,6 +200,12 @@ export interface PeopleApi {
   removeMailSettings(): Promise<ServerEmail>;
   /** Send one mail to check the settings. It throws with the email server's own words. */
   testMail(to: string): Promise<void>;
+  /** How each sign-in service is set up, for an owner. Never an app's secret. */
+  signInServices(): Promise<ServerSignInService[]>;
+  /** Set up Discord or Google. A secret left out keeps the one the server has. */
+  setSignInService(id: string, change: ServerSignInServiceChange): Promise<ServerSignInService[]>;
+  /** Forget what was set on the page for a service. */
+  removeSignInService(id: string): Promise<ServerSignInService[]>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -261,6 +272,9 @@ export function peopleApi(baseUrl: string): PeopleApi {
     setMailSettings: (change) => setServerMail(baseUrl, change),
     removeMailSettings: () => removeServerMail(baseUrl),
     testMail: (to) => testServerMail(baseUrl, to),
+    signInServices: () => serverSignInServices(baseUrl),
+    setSignInService: (id, change) => setServerSignInService(baseUrl, id, change),
+    removeSignInService: (id) => removeServerSignInService(baseUrl, id),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }

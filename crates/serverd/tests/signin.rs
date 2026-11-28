@@ -1972,3 +1972,473 @@ async fn open_sign_up_makes_nobody_an_owner_and_does_not_change_adding_a_sign_in
     let went = asked.get(&rig, "/api/accounts/acct_x/sign-ins").await;
     assert_eq!(went.status, StatusCode::FORBIDDEN);
 }
+
+// ── Setting Discord and Google up on the page ───────────────────────────────
+
+/// A server whose environment sets up `env` only. A provider an owner sets up on the
+/// page is pointed at the stand-in, as the real server points it at the real provider.
+async fn rig_page(env: &[&str]) -> Rig {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(BOOK_FILE),
+        r#"{"clubs":[{"id":"north","name":"North FPV"},{"id":"south","name":"South FPV"}]}"#,
+    )
+    .unwrap();
+    let fake = fake().await;
+    let keys = || ("the-client-id".to_owned(), "the-client-secret".to_owned());
+    let providers = env
+        .iter()
+        .map(|id| {
+            let (client_id, secret) = keys();
+            fake.provider(match *id {
+                "discord" => Provider::discord(client_id, secret),
+                _ => Provider::google(client_id, secret),
+            })
+        })
+        .collect();
+    let shape = fake.clone();
+    let state = AppState::open(dir.path())
+        .unwrap()
+        .at(Some(PUBLIC.into()))
+        .with_providers(providers)
+        .with_provider_shape(move |made| shape.provider(made));
+    Rig {
+        app: router(state.clone()),
+        state,
+        fake,
+        _dir: dir,
+    }
+}
+
+impl Browser {
+    /// A request with a JSON body, from this server's own page.
+    async fn send(&mut self, rig: &Rig, method: Method, path: &str, body: Value) -> Went {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, "grid.example.org")
+            .header(header::ORIGIN, PUBLIC)
+            .header(header::CONTENT_TYPE, "application/json");
+        if !self.cookies.is_empty() {
+            let line: Vec<String> = self
+                .cookies
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            request = request.header(header::COOKIE, line.join("; "));
+        }
+        let response = rig
+            .app
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        Went {
+            status,
+            location: String::new(),
+            set: Vec::new(),
+            body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        }
+    }
+}
+
+const SERVICES: &str = "/api/server/sign-in-services";
+
+/// An owner, signed in with `provider`.
+async fn owner(rig: &Rig, provider: &str) -> Browser {
+    let mut browser = Browser::default();
+    let secret = rig.invite(InviteKind::Owner).1;
+    let user = match provider {
+        "discord" => discord_user("1", "Ryan"),
+        _ => google_user("g-1", "Ryan"),
+    };
+    let went = browser
+        .sign_in(rig, provider, &format!("?invite={secret}"), user)
+        .await;
+    assert!(signed_in(&went), "{}", went.location);
+    browser
+}
+
+fn service<'a>(list: &'a Value, id: &str) -> &'a Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|one| one["id"] == id)
+        .unwrap_or_else(|| panic!("no {id} in {list}"))
+}
+
+#[tokio::test]
+async fn only_an_owner_reads_or_sets_the_sign_in_services() {
+    let rig = rig_page(&["google"]).await;
+    let change = json!({"client_id": "the-client-id", "client_secret": "the-client-secret"});
+    let discord = format!("{SERVICES}/discord");
+
+    let mut nobody = Browser::default();
+    assert_eq!(
+        nobody.get(&rig, SERVICES).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let went = nobody
+        .send(&rig, Method::PUT, &discord, change.clone())
+        .await;
+    assert_eq!(went.status, StatusCode::UNAUTHORIZED);
+
+    // A director runs a club, and not the server.
+    let mut director = Browser::default();
+    let invite = rig.personal("north", Role::Director);
+    director
+        .sign_in(
+            &rig,
+            "google",
+            &format!("?invite={invite}"),
+            google_user("g-9", "Dee"),
+        )
+        .await;
+    assert_eq!(
+        director.get(&rig, SERVICES).await.status,
+        StatusCode::FORBIDDEN
+    );
+    let went = director.send(&rig, Method::PUT, &discord, change).await;
+    assert_eq!(went.status, StatusCode::FORBIDDEN);
+    let went = director.ask(&rig, Method::DELETE, &discord).await;
+    assert_eq!(went.status, StatusCode::FORBIDDEN);
+    assert!(rig.state.book.sign_in_apps().is_empty());
+}
+
+#[tokio::test]
+async fn an_owner_sets_discord_up_on_the_page_and_people_sign_in_with_it_at_once() {
+    let rig = rig_page(&["google"]).await;
+    let mut ryan = owner(&rig, "google").await;
+
+    // What is there to start with: Discord off, Google from the environment.
+    let list = ryan.get(&rig, SERVICES).await.body;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert_eq!(
+        service(&list, "discord"),
+        &json!({
+            "id": "discord", "name": "Discord", "source": "off", "editable": true,
+            "secret_set": false,
+            "redirect": format!("{PUBLIC}/auth/discord/callback")
+        })
+    );
+    assert_eq!(
+        service(&list, "google"),
+        &json!({
+            "id": "google", "name": "Google", "source": "env", "editable": true,
+            "client_id": "the-client-id", "secret_set": true,
+            "redirect": format!("{PUBLIC}/auth/google/callback")
+        })
+    );
+    let mut visitor = Browser::default();
+    assert_eq!(
+        visitor.get(&rig, "/api/sign-in/providers").await.body,
+        json!([{"id": "google", "name": "Google"}])
+    );
+    let went = visitor.start(&rig, "discord", "").await;
+    assert_eq!(
+        went.location,
+        format!("{PUBLIC}/#/sign-in?problem=not-set-up")
+    );
+
+    // Set up, with the spaces a paste brings along.
+    let went = ryan
+        .send(
+            &rig,
+            Method::PUT,
+            &format!("{SERVICES}/discord"),
+            json!({"client_id": " the-client-id ", "client_secret": "the-client-secret\n"}),
+        )
+        .await;
+    assert_eq!(went.status, StatusCode::OK, "{}", went.body);
+    assert_eq!(service(&went.body, "discord")["source"], "page");
+    assert_eq!(service(&went.body, "discord")["client_id"], "the-client-id");
+    assert_eq!(service(&went.body, "discord")["secret_set"], true);
+    // The secret is never sent back.
+    assert!(!went.body.to_string().contains("the-client-secret"));
+    assert!(
+        !ryan
+            .get(&rig, SERVICES)
+            .await
+            .body
+            .to_string()
+            .contains("the-client-secret")
+    );
+
+    // It is offered at once, in the usual order, and it works.
+    assert_eq!(
+        visitor.get(&rig, "/api/sign-in/providers").await.body,
+        json!([{"id": "discord", "name": "Discord"}, {"id": "google", "name": "Google"}])
+    );
+    let before = rig.fake.asked().len();
+    let invite = rig.personal("north", Role::Pilot);
+    let started = visitor
+        .start(&rig, "discord", &format!("?invite={invite}"))
+        .await;
+    let params = query_of(&started.location);
+    assert_eq!(params["client_id"], "the-client-id");
+    assert_eq!(
+        params["redirect_uri"],
+        format!("{PUBLIC}/auth/discord/callback")
+    );
+    let code = approve(&rig, &params, discord_user("42", "Ace"));
+    let went = visitor
+        .get(
+            &rig,
+            &format!(
+                "/auth/discord/callback?code={code}&state={}",
+                params["state"]
+            ),
+        )
+        .await;
+    assert!(signed_in(&went), "{}", went.location);
+    assert_eq!(visitor.me(&rig).await["account"]["name"], "Ace");
+    let asked = rig.fake.asked();
+    assert_eq!(asked.len(), before + 1);
+    assert_eq!(asked[before]["client_secret"], "the-client-secret");
+
+    // It is kept: a server opened again over the same folder still has it.
+    let again = AppState::open(rig._dir.path()).unwrap();
+    assert_eq!(
+        again.book.sign_in_apps()["discord"].client_id,
+        "the-client-id"
+    );
+}
+
+#[tokio::test]
+async fn a_secret_left_empty_keeps_the_one_that_is_kept() {
+    let rig = rig_page(&["google"]).await;
+    let mut ryan = owner(&rig, "google").await;
+    let discord = format!("{SERVICES}/discord");
+
+    // The first time there is nothing to keep.
+    let went = ryan
+        .send(&rig, Method::PUT, &discord, json!({"client_id": "abc"}))
+        .await;
+    assert_eq!(went.status, StatusCode::BAD_REQUEST);
+    assert!(
+        went.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("client secret")
+    );
+    // Google's secret in the environment is not the page's to keep either.
+    let went = ryan
+        .send(
+            &rig,
+            Method::PUT,
+            &format!("{SERVICES}/google"),
+            json!({"client_id": "abc"}),
+        )
+        .await;
+    assert_eq!(went.status, StatusCode::BAD_REQUEST);
+
+    ryan.send(
+        &rig,
+        Method::PUT,
+        &discord,
+        json!({"client_id": "first", "client_secret": "the-client-secret"}),
+    )
+    .await;
+    for empty in [
+        json!({"client_id": "second"}),
+        json!({"client_id": "third", "client_secret": "  "}),
+    ] {
+        let went = ryan.send(&rig, Method::PUT, &discord, empty).await;
+        assert_eq!(went.status, StatusCode::OK, "{}", went.body);
+    }
+    let kept = rig.state.book.sign_in_apps();
+    assert_eq!(kept["discord"].client_id, "third");
+    assert_eq!(kept["discord"].client_secret, "the-client-secret");
+}
+
+#[tokio::test]
+async fn what_does_not_look_like_an_apps_values_is_refused_and_nothing_is_kept() {
+    let rig = rig_page(&["google"]).await;
+    let mut ryan = owner(&rig, "google").await;
+    let discord = format!("{SERVICES}/discord");
+    let long = "x".repeat(301);
+    for bad in [
+        json!({"client_id": "", "client_secret": "s"}),
+        json!({"client_id": "   ", "client_secret": "s"}),
+        json!({"client_id": "two words", "client_secret": "s"}),
+        json!({"client_id": "abc", "client_secret": "two words"}),
+        json!({"client_id": long, "client_secret": "s"}),
+        json!({"client_id": "abc", "client_secret": long}),
+    ] {
+        let went = ryan.send(&rig, Method::PUT, &discord, bad.clone()).await;
+        assert_eq!(went.status, StatusCode::BAD_REQUEST, "{bad}");
+        assert!(went.body["message"].is_string());
+    }
+    assert!(rig.state.book.sign_in_apps().is_empty());
+
+    // A service this build has no name for is not set up on the page.
+    for other in ["oidc", "facebook", "password"] {
+        let went = ryan
+            .send(
+                &rig,
+                Method::PUT,
+                &format!("{SERVICES}/{other}"),
+                json!({"client_id": "a", "client_secret": "b"}),
+            )
+            .await;
+        assert_eq!(went.status, StatusCode::NOT_FOUND, "{other}");
+        let went = ryan
+            .ask(&rig, Method::DELETE, &format!("{SERVICES}/{other}"))
+            .await;
+        assert_eq!(went.status, StatusCode::NOT_FOUND, "{other}");
+    }
+    assert!(rig.state.book.sign_in_apps().is_empty());
+}
+
+#[tokio::test]
+async fn what_is_set_on_the_page_wins_and_removing_it_goes_back_to_the_environment() {
+    let rig = rig_page(&["discord", "google"]).await;
+    let mut ryan = owner(&rig, "discord").await;
+    let google = format!("{SERVICES}/google");
+
+    // Google is set on the page with a secret the provider does not take.
+    let went = ryan
+        .send(
+            &rig,
+            Method::PUT,
+            &google,
+            json!({"client_id": "the-client-id", "client_secret": "wrong"}),
+        )
+        .await;
+    assert_eq!(service(&went.body, "google")["source"], "page");
+    let invite = rig.personal("north", Role::Pilot);
+    let mut ace = Browser::default();
+    let went = ace
+        .sign_in(
+            &rig,
+            "google",
+            &format!("?invite={invite}"),
+            google_user("g-2", "Ace"),
+        )
+        .await;
+    assert_eq!(
+        went.location,
+        format!("{PUBLIC}/#/sign-in?problem=provider")
+    );
+    assert_eq!(rig.fake.asked().last().unwrap()["client_secret"], "wrong");
+
+    // Removed, the environment's is used again, and it works.
+    let went = ryan.ask(&rig, Method::DELETE, &google).await;
+    assert_eq!(went.status, StatusCode::OK);
+    assert_eq!(service(&went.body, "google")["source"], "env");
+    let went = ace
+        .sign_in(
+            &rig,
+            "google",
+            &format!("?invite={invite}"),
+            google_user("g-2", "Ace"),
+        )
+        .await;
+    assert!(signed_in(&went), "{}", went.location);
+    // Removing what is not set is no mistake.
+    assert_eq!(
+        ryan.ask(&rig, Method::DELETE, &google).await.status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn an_owner_cannot_remove_the_only_way_they_sign_in() {
+    // Nothing in the environment: Discord and Google are both set on the page.
+    let rig = rig_page(&[]).await;
+    for id in ["discord", "google"] {
+        rig.state
+            .book
+            .set_sign_in_app(
+                id,
+                Some(gridfpv_serverd::signin::AppKeys {
+                    client_id: "the-client-id".into(),
+                    client_secret: "the-client-secret".into(),
+                }),
+            )
+            .unwrap();
+    }
+    let mut ryan = owner(&rig, "discord").await;
+    let discord = format!("{SERVICES}/discord");
+
+    let went = ryan.ask(&rig, Method::DELETE, &discord).await;
+    assert_eq!(went.status, StatusCode::CONFLICT);
+    assert!(
+        went.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("lock yourself out")
+    );
+    assert!(rig.state.book.sign_in_apps().contains_key("discord"));
+    // A password they hold does not count while passwords are off.
+    // Google is not how they sign in, so it can go. It comes back for the next step.
+    assert_eq!(
+        ryan.ask(&rig, Method::DELETE, &format!("{SERVICES}/google"))
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let went = ryan
+        .send(
+            &rig,
+            Method::PUT,
+            &format!("{SERVICES}/google"),
+            json!({"client_id": "the-client-id", "client_secret": "the-client-secret"}),
+        )
+        .await;
+    assert_eq!(went.status, StatusCode::OK);
+
+    // With Google added to their account, Discord can be removed, and is gone for all.
+    let went = ryan
+        .sign_in(&rig, "google", "?add=1", google_user("g-1", "Ryan"))
+        .await;
+    assert!(went.location.contains("/#/account"), "{}", went.location);
+    let went = ryan.ask(&rig, Method::DELETE, &discord).await;
+    assert_eq!(went.status, StatusCode::OK, "{}", went.body);
+    assert_eq!(service(&went.body, "discord")["source"], "off");
+    let mut visitor = Browser::default();
+    assert_eq!(
+        visitor.get(&rig, "/api/sign-in/providers").await.body,
+        json!([{"id": "google", "name": "Google"}])
+    );
+    let went = visitor.start(&rig, "discord", "").await;
+    assert_eq!(
+        went.location,
+        format!("{PUBLIC}/#/sign-in?problem=not-set-up")
+    );
+    // And now Google is the only way left.
+    let went = ryan
+        .ask(&rig, Method::DELETE, &format!("{SERVICES}/google"))
+        .await;
+    assert_eq!(went.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_server_that_does_not_know_its_address_says_so_and_offers_nothing() {
+    let rig = rig_page(&["google"]).await;
+    let mut ryan = owner(&rig, "google").await;
+    // The same data, on a server not told where it is.
+    let state = AppState::open(rig._dir.path()).unwrap();
+    let bare = Rig {
+        app: router(state.clone()),
+        state,
+        fake: rig.fake.clone(),
+        _dir: tempfile::tempdir().unwrap(),
+    };
+    let went = ryan
+        .send(
+            &bare,
+            Method::PUT,
+            &format!("{SERVICES}/discord"),
+            json!({"client_id": "a", "client_secret": "b"}),
+        )
+        .await;
+    assert_eq!(went.status, StatusCode::OK, "{}", went.body);
+    assert!(service(&went.body, "discord").get("redirect").is_none());
+    assert_eq!(
+        ryan.get(&bare, "/api/sign-in/providers").await.body,
+        json!([])
+    );
+}
