@@ -11,7 +11,7 @@
    * event has it (§13.4). What they ask for goes to the Director, which decides it as it
    * would at the race. Nothing else can be changed from this page.
    */
-  import { Badge, Banner, Button, Card, Dialog, InfoTip, Input, Select } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Dialog, Input, Select } from '@gridfpv/components';
   import Page from '../Page.svelte';
   import {
     dropSeat,
@@ -64,6 +64,7 @@
   import ServerClub from './ServerClub.svelte';
   import ServerInvite from './ServerInvite.svelte';
   import ServerNav from './ServerNav.svelte';
+  import ServerSignInServices from './ServerSignInServices.svelte';
   import ServerJoin from './ServerJoin.svelte';
   import ServerReconnect from './ServerReconnect.svelte';
   import ServerClubs from './ServerClubs.svelte';
@@ -705,28 +706,15 @@
         <div class="cards">
           <ServerSignUpSetting api={people} onchange={(open) => (openSignUp = open)} />
           <ServerPasswordSetting api={people} onchange={(on) => (passwordOn = on)} />
-          <Card elevation="sm">
-            <div class="block" data-testid="sign-in-services">
-              <div class="head">
-                <h2>Sign-in services</h2>
-                <InfoTip
-                  text="Discord, Google and the like. They are set in the server's settings file."
-                  label="About sign-in services"
-                />
-              </div>
-              {#if providers === undefined}
-                <p class="muted" role="status">Loading…</p>
-              {:else if providers.length === 0}
-                <p class="muted">None set up.</p>
-              {:else}
-                <ul>
-                  {#each providers as provider (provider.id)}
-                    <li>{provider.name}</li>
-                  {/each}
-                </ul>
-              {/if}
-            </div>
-          </Card>
+          <ServerSignInServices
+            api={people}
+            onchange={() => {
+              people
+                .providers()
+                .then((found) => (providers = found))
+                .catch(() => {});
+            }}
+          />
         </div>
       {:else}
         <ServerEmailSetting api={people} onchange={(on) => (emailOn = on)} />

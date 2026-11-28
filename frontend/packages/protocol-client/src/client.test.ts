@@ -705,6 +705,27 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     expect(JSON.parse(seen[3].init?.body as string)).toEqual({ to: 'oz@example.org' });
   });
 
+  it("reads, sets and removes a server's sign-in services", async () => {
+    const { serverSignInServices, setServerSignInService, removeServerSignInService } =
+      await import('./client.js');
+    const list = [
+      { id: 'discord', name: 'Discord', source: 'page', editable: true, secret_set: true }
+    ];
+    const { seen, fetch } = recorder(200, list);
+    const base = 'https://grid.example.org';
+    expect(await serverSignInServices(`${base}/`, { fetch })).toEqual(list);
+    expect(seen[0].url).toBe(`${base}/api/server/sign-in-services`);
+    expect(seen[0].init?.method ?? 'GET').toBe('GET');
+    const change = { client_id: '123', client_secret: 'shh' };
+    expect(await setServerSignInService(base, 'discord', change, { fetch })).toEqual(list);
+    expect(seen[1].url).toBe(`${base}/api/server/sign-in-services/discord`);
+    expect(seen[1].init?.method).toBe('PUT');
+    expect(JSON.parse(seen[1].init?.body as string)).toEqual(change);
+    await removeServerSignInService(base, 'google', { fetch });
+    expect(seen[2].url).toBe(`${base}/api/server/sign-in-services/google`);
+    expect(seen[2].init?.method).toBe('DELETE');
+  });
+
   it('email goes to the right addresses', async () => {
     const { setServerEmail, removeServerEmail, confirmServerEmail, forgotServerPassword } =
       await import('./client.js');

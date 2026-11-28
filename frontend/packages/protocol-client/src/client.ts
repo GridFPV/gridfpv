@@ -56,6 +56,8 @@ import type {
   EmailConfirmed,
   ServerEmail,
   ServerEmailChange,
+  ServerSignInService,
+  ServerSignInServiceChange,
   PasswordChange,
   PasswordSignIn,
   PasswordSignUp,
@@ -1337,6 +1339,57 @@ export async function testServerMail(
     '/api/server/email/test',
     { method: 'POST', body: { to }, fetch: options.fetch },
     'send the test'
+  );
+}
+
+/**
+ * How each sign-in service of a server is set up (`GET /api/server/sign-in-services`).
+ * For an owner of the server. An app's secret is never in it.
+ */
+export async function serverSignInServices(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerSignInService[]> {
+  return apiJson<ServerSignInService[]>(
+    baseUrl,
+    '/api/server/sign-in-services',
+    { fetch: options.fetch },
+    'read the sign-in services'
+  );
+}
+
+/**
+ * Set up Discord or Google on a server (`PUT /api/server/sign-in-services/‹id›`). For an
+ * owner. A secret left out keeps the one the server has.
+ */
+export async function setServerSignInService(
+  baseUrl: string,
+  id: string,
+  change: ServerSignInServiceChange,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerSignInService[]> {
+  return apiJson<ServerSignInService[]>(
+    baseUrl,
+    `/api/server/sign-in-services/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: change, fetch: options.fetch },
+    'save the sign-in service'
+  );
+}
+
+/**
+ * Forget what was set on the page for a sign-in service
+ * (`DELETE /api/server/sign-in-services/‹id›`). For an owner.
+ */
+export async function removeServerSignInService(
+  baseUrl: string,
+  id: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerSignInService[]> {
+  return apiJson<ServerSignInService[]>(
+    baseUrl,
+    `/api/server/sign-in-services/${encodeURIComponent(id)}`,
+    { method: 'DELETE', fetch: options.fetch },
+    'remove the sign-in service'
   );
 }
 

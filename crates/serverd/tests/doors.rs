@@ -141,6 +141,19 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             Some(json!({"host": "smtp.example.org", "from": "Grid <grid@example.org>"})),
         ),
         (Method::DELETE, "/api/server/email", Owner, None),
+        (Method::GET, "/api/server/sign-in-services", Owner, None),
+        (
+            Method::PUT,
+            "/api/server/sign-in-services/{id}",
+            Owner,
+            Some(json!({"client_id": "123", "client_secret": "shh"})),
+        ),
+        (
+            Method::DELETE,
+            "/api/server/sign-in-services/{id}",
+            Owner,
+            None,
+        ),
         (
             Method::POST,
             "/api/server/email/test",

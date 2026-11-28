@@ -148,9 +148,10 @@ fn serve() -> Done {
         for club in state.book.clubs() {
             println!("  club: {}", club.name);
         }
-        match (&state.public_url, state.providers.is_empty()) {
+        let providers = gridfpv_serverd::signin::providers_now(&state);
+        match (&state.public_url, providers.is_empty()) {
             (Some(url), false) => {
-                let names: Vec<&str> = state.providers.iter().map(|p| p.name.as_str()).collect();
+                let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
                 println!("  sign-in with {} at {url}", names.join(" and "));
             }
             (None, false) => println!(
